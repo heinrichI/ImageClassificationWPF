@@ -30,12 +30,12 @@ public static class AppServiceFactory
                 // Windows
                 services.AddTransient<MainWindow>();
 
-                // ViewModels
+                // ViewModels — Singleton so MainViewModel and any later resolve share one instance per tab
                 services.AddSingleton<MainViewModel>();
-                services.AddTransient<TrainViewModel>();
-                services.AddTransient<EvaluateViewModel>();
-                services.AddTransient<ClassifyViewModel>();
-                services.AddTransient<AnalyzeViewModel>();
-                services.AddTransient<SettingsViewModel>();
+                services.AddSingleton<TrainViewModel>();
+                services.AddSingleton<EvaluateViewModel>();
+                services.AddSingleton<ClassifyViewModel>();
+                services.AddSingleton<AnalyzeViewModel>();
+                services.AddSingleton<SettingsViewModel>();
             });
 }

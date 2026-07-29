@@ -4,25 +4,27 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:views="clr-namespace:ImageClassification.UI.Views"
+        xmlns:vm="clr-namespace:ImageClassification.UI.ViewModels"
         mc:Ignorable="d"
+        d:DataContext="{d:DesignInstance Type=vm:MainViewModel, IsDesignTimeCreatable=False}"
         Title="Image Classification" Height="720" Width="1100"
         WindowStartupLocation="CenterScreen">
     <Grid>
-        <TabControl x:Name="MainTabControl" SelectionChanged="TabControl_SelectionChanged">
+        <TabControl SelectedIndex="{Binding SelectedTabIndex}">
             <TabItem Header="  Training  ">
-                <views:TrainView x:Name="TrainViewControl" />
+                <views:TrainView DataContext="{Binding Train}" />
             </TabItem>
             <TabItem Header="  Evaluation  ">
-                <views:EvaluateView x:Name="EvaluateViewControl" />
+                <views:EvaluateView DataContext="{Binding Evaluate}" />
             </TabItem>
             <TabItem Header="  Classify &amp; Sort  ">
-                <views:ClassifyView x:Name="ClassifyViewControl" />
+                <views:ClassifyView DataContext="{Binding Classify}" />
             </TabItem>
             <TabItem Header="  Analyze  ">
-                <views:AnalyzeView x:Name="AnalyzeViewControl" />
+                <views:AnalyzeView DataContext="{Binding Analyze}" />
             </TabItem>
             <TabItem Header="  Settings  ">
-                <views:SettingsView x:Name="SettingsViewControl" />
+                <views:SettingsView DataContext="{Binding Settings}" />
             </TabItem>
         </TabControl>
     </Grid>
