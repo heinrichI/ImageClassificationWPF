@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/ImageClassification.Core/ImageClassification.Core.csproj" />
+    <Project Path="src/ImageClassification.Tests/ImageClassification.Tests.csproj" />
+    <Project Path="src/ImageClassification.UI/ImageClassification.UI.csproj" />
+  </Folder>
+</Solution>
