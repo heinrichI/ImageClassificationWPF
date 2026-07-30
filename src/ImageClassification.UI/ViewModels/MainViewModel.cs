@@ -14,19 +14,22 @@ public partial class MainViewModel : ObservableObject
     public ClassifyViewModel Classify { get; }
     public AnalyzeViewModel Analyze { get; }
     public SettingsViewModel Settings { get; }
+    public ComicCoverSearchViewModel ComicCoverSearch { get; }
 
     public MainViewModel(
         TrainViewModel train,
         EvaluateViewModel evaluate,
         ClassifyViewModel classify,
         AnalyzeViewModel analyze,
-        SettingsViewModel settings)
+        SettingsViewModel settings,
+        ComicCoverSearchViewModel comicCoverSearch)
     {
         Train = train;
         Evaluate = evaluate;
         Classify = classify;
         Analyze = analyze;
         Settings = settings;
+        ComicCoverSearch = comicCoverSearch;
     }
 
     [ObservableProperty]

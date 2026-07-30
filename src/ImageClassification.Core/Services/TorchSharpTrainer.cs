@@ -3,7 +3,7 @@ using ImageClassification.Core.Models;
 
 namespace ImageClassification.Core.Services;
 
-public class TorchSharpTrainer : IModelTrainer
+internal sealed class TorchSharpTrainer : IModelTrainer
 {
     public bool IsTraining { get; private set; }
 

@@ -5,8 +5,6 @@ namespace ImageClassification.Core.Services;
 public interface IImageSorter
 {
     Task<SortResult> SortImagesAsync(
-        string modelPath,
-        string labelFilePath,
         string sourceDirectory,
         float confidenceThreshold,
         int imageSize,
@@ -18,8 +16,6 @@ public interface IImageSorter
         CancellationToken cancellationToken = default);
 
     Task<List<SortWarning>> DetectTimestampConflictsAsync(
-        string modelPath,
-        string labelFilePath,
         string sourceDirectory,
         int imageSize,
         float timestampWindowMinutes = 1f);

@@ -17,7 +17,6 @@ public partial class EvaluateViewModel : ObservableObject
         _evaluator = evaluator;
     }
 
-    [ObservableProperty] private string _modelPath = string.Empty;
     [ObservableProperty] private string _testDirectory = string.Empty;
     [ObservableProperty] private int _imageSize = 224;
     [ObservableProperty] private int _batchSize = 32;
@@ -33,14 +32,6 @@ public partial class EvaluateViewModel : ObservableObject
     public string[]? ConfusionMatrixLabels { get; private set; }
 
     [RelayCommand]
-    private void BrowseModel()
-    {
-        var dialog = new OpenFileDialog { Filter = "ONNX Model|*.onnx|All Files|*.*" };
-        if (dialog.ShowDialog() == true)
-            ModelPath = dialog.FileName;
-    }
-
-    [RelayCommand]
     private void BrowseTestDirectory()
     {
         var dialog = new OpenFolderDialog { Title = "Select Test Directory" };
@@ -51,9 +42,9 @@ public partial class EvaluateViewModel : ObservableObject
     [RelayCommand]
     private async Task RunEvaluationAsync()
     {
-        if (string.IsNullOrEmpty(ModelPath) || string.IsNullOrEmpty(TestDirectory))
+        if (string.IsNullOrEmpty(TestDirectory))
         {
-            StatusText = "Please select model and test directory";
+            StatusText = "Please select a test directory";
             return;
         }
 
@@ -67,7 +58,7 @@ public partial class EvaluateViewModel : ObservableObject
 
         try
         {
-            var result = await _evaluator.EvaluateAsync(ModelPath, TestDirectory, ImageSize, BatchSize, progress);
+            var result = await _evaluator.EvaluateAsync(TestDirectory, ImageSize, BatchSize, progress);
 
             Application.Current.Dispatcher.Invoke(() =>
             {

@@ -4,7 +4,7 @@ namespace ImageClassification.Core.Services;
 /// Pure C# k-means clustering implementation.
 /// No external dependencies needed.
 /// </summary>
-public class ClusterService : IClusterService
+internal sealed class ClusterService : IClusterService
 {
     private readonly Random _rng = new(42);
 

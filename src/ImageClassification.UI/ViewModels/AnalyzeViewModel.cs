@@ -39,13 +39,11 @@ public partial class AnalyzeViewModel : ObservableObject
     [ObservableProperty] private bool _isClusterMode = true;
 
     // Cluster mode
-    [ObservableProperty] private string _modelPath = string.Empty;
     [ObservableProperty] private int _numClusters = 5;
     [ObservableProperty] private bool _autoDetectClusters = true;
     [ObservableProperty] private string _detectedKText = string.Empty;
 
     // Tag mode
-    [ObservableProperty] private string _clipModelPath = string.Empty;
     [ObservableProperty] private string _candidateTags = "person, animal, landscape, building, food, vehicle, document, art, nature, indoor";
     [ObservableProperty] private int _topK = 5;
     [ObservableProperty] private float _tagConfidenceThreshold = 0.3f;
@@ -64,39 +62,11 @@ public partial class AnalyzeViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private void BrowseModel()
-    {
-        var dialog = new OpenFileDialog { Filter = "ONNX Model|*.onnx|All Files|*.*" };
-        if (dialog.ShowDialog() == true)
-            ModelPath = dialog.FileName;
-    }
-
-    [RelayCommand]
-    private void BrowseClipModel()
-    {
-        var dialog = new OpenFileDialog { Filter = "ONNX Model|*.onnx|All Files|*.*" };
-        if (dialog.ShowDialog() == true)
-            ClipModelPath = dialog.FileName;
-    }
-
-    [RelayCommand]
     private async Task AnalyzeAsync()
     {
         if (string.IsNullOrEmpty(SourceDirectory))
         {
             StatusText = "Please select a source directory";
-            return;
-        }
-
-        if (IsClusterMode && string.IsNullOrEmpty(ModelPath))
-        {
-            StatusText = "Please select a model for clustering";
-            return;
-        }
-
-        if (!IsClusterMode && string.IsNullOrEmpty(ClipModelPath))
-        {
-            StatusText = "Please select a CLIP model for tag generation";
             return;
         }
 
@@ -129,8 +99,7 @@ public partial class AnalyzeViewModel : ObservableObject
                 });
             });
 
-            // Extract features
-            await _featureExtractor.LoadModelAsync(ModelPath, 224);
+            // Extract features (model loaded lazily inside service)
             var features = await _featureExtractor.ExtractBatchAsync(imagePaths, progress);
 
             var featureArray = features.Select(f => f.Features).ToArray();
@@ -196,8 +165,7 @@ public partial class AnalyzeViewModel : ObservableObject
 
     private async Task RunTagGenerationAsync(List<string> imagePaths)
     {
-        StatusText = "Loading CLIP model...";
-        await _tagService.LoadModelAsync(ClipModelPath);
+        StatusText = "Generating tags...";
 
         var tags = CandidateTags
             .Split(new[] { ',', '\n', ';' }, StringSplitOptions.RemoveEmptyEntries)

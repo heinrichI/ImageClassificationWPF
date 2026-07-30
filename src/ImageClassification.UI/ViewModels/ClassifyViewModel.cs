@@ -18,8 +18,6 @@ public partial class ClassifyViewModel : ObservableObject
         _sorter = sorter;
     }
 
-    [ObservableProperty] private string _modelPath = string.Empty;
-    [ObservableProperty] private string _labelFilePath = string.Empty;
     [ObservableProperty] private string _sourceDirectory = string.Empty;
     [ObservableProperty] private float _confidenceThreshold = 0.999f;
     [ObservableProperty] private int _imageSize = 224;
@@ -38,22 +36,6 @@ public partial class ClassifyViewModel : ObservableObject
     public ObservableCollection<SortWarning> Warnings { get; } = new();
 
     [RelayCommand]
-    private void BrowseModel()
-    {
-        var dialog = new OpenFileDialog { Filter = "ONNX Model|*.onnx|All Files|*.*" };
-        if (dialog.ShowDialog() == true)
-            ModelPath = dialog.FileName;
-    }
-
-    [RelayCommand]
-    private void BrowseLabels()
-    {
-        var dialog = new OpenFileDialog { Filter = "Text Files|*.txt|All Files|*.*" };
-        if (dialog.ShowDialog() == true)
-            LabelFilePath = dialog.FileName;
-    }
-
-    [RelayCommand]
     private void BrowseSourceDirectory()
     {
         var dialog = new OpenFolderDialog { Title = "Select Source Directory" };
@@ -64,9 +46,9 @@ public partial class ClassifyViewModel : ObservableObject
     [RelayCommand]
     private async Task SortImagesAsync()
     {
-        if (string.IsNullOrEmpty(ModelPath) || string.IsNullOrEmpty(LabelFilePath) || string.IsNullOrEmpty(SourceDirectory))
+        if (string.IsNullOrEmpty(SourceDirectory))
         {
-            StatusText = "Please select model, labels, and source directory";
+            StatusText = "Please select a source directory";
             return;
         }
 
@@ -78,7 +60,7 @@ public partial class ClassifyViewModel : ObservableObject
         {
             // Detect conflicts first
             var conflicts = await _sorter.DetectTimestampConflictsAsync(
-                ModelPath, LabelFilePath, SourceDirectory,
+                SourceDirectory,
                 ImageSize, TimestampWindowMinutes);
 
             if (conflicts.Count > 0)
@@ -141,7 +123,7 @@ public partial class ClassifyViewModel : ObservableObject
         var progress = new Progress<SortProgress>(OnSortProgress);
 
         var result = await _sorter.SortImagesAsync(
-            ModelPath, LabelFilePath, SourceDirectory,
+            SourceDirectory,
             ConfidenceThreshold, ImageSize, BatchSize,
             moveFiles: false,
             timestampWindowMinutes: TimestampWindowMinutes,

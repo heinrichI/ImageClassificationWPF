@@ -16,7 +16,15 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\ImageClassification.ArchiveReader\ImageClassification.ArchiveReader.csproj" />
     <ProjectReference Include="..\ImageClassification.Core\ImageClassification.Core.csproj" />
+    <ProjectReference Include="..\ImageClassification.VectorStore\ImageClassification.VectorStore.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 
 </Project>

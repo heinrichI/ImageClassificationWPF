@@ -12,11 +12,38 @@ namespace ImageClassification.Core.Services;
 /// Extracts feature embeddings from ONNX model's penultimate layer.
 /// Used by clustering and tag generation modes.
 /// </summary>
-public class ImageFeatureExtractor : IImageFeatureExtractor
+internal sealed class ImageFeatureExtractor : IImageFeatureExtractor
 {
+    private readonly IModelDownloader _downloader;
     private InferenceSession? _session;
     private int _imageSize = 224;
     private string _featureOutputName = string.Empty;
+    private bool _initialized;
+    private Task? _initTask;
+    private readonly object _initLock = new();
+
+    public ImageFeatureExtractor(IModelDownloader downloader)
+    {
+        _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+    }
+
+    private Task EnsureInitializedAsync()
+    {
+        if (_initialized) return Task.CompletedTask;
+        lock (_initLock)
+        {
+            if (_initialized) return Task.CompletedTask;
+            _initTask ??= InitializeAsync();
+        }
+        return _initTask;
+    }
+
+    private async Task InitializeAsync()
+    {
+        var modelPath = _downloader.GetModelPath("mobilenet_v2.onnx");
+        await LoadModelAsync(modelPath, 224);
+        _initialized = true;
+    }
 
     public async Task LoadModelAsync(string modelPath, int imageSize)
     {
@@ -53,6 +80,7 @@ public class ImageFeatureExtractor : IImageFeatureExtractor
 
     public float[] ExtractFeatures(string imagePath)
     {
+        EnsureInitializedAsync().GetAwaiter().GetResult();
         ObjectDisposedException.ThrowIf(_session is null, this);
 
         using var image = Image.Load<Rgb24>(imagePath);
@@ -92,6 +120,7 @@ public class ImageFeatureExtractor : IImageFeatureExtractor
     public async Task<List<ImageFeatures>> ExtractBatchAsync(
         List<string> imagePaths, IProgress<int>? progress = null)
     {
+        await EnsureInitializedAsync().ConfigureAwait(false);
         var results = new ConcurrentBag<ImageFeatures>();
 
         await Task.Run(() =>

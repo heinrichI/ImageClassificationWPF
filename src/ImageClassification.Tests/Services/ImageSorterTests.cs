@@ -25,7 +25,7 @@ public class ImageSorterTests
         {
             // Act
             var result = await sorter.SortImagesAsync(
-                "model.onnx", "labels.txt", tempDir,
+                tempDir,
                 0.9f, 224, 32);
 
             // Assert

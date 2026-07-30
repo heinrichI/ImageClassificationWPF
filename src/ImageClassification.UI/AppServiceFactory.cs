@@ -1,4 +1,3 @@
-using ImageClassification.Core.Services;
 using ImageClassification.UI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -17,25 +16,21 @@ public static class AppServiceFactory
         Microsoft.Extensions.Hosting.Host.CreateDefaultBuilder()
             .ConfigureServices((_, services) =>
             {
-                // Core services — registered by interface (DIP)
-                services.AddSingleton<IImageClassifier, OnnxClassifier>();
-                services.AddSingleton<IModelTrainer, TorchSharpTrainer>();
-                services.AddSingleton<IModelEvaluator, ModelEvaluator>();
-                services.AddSingleton<IImageSorter, ImageSorter>();
-                services.AddSingleton<IImageFeatureExtractor, ImageFeatureExtractor>();
-                services.AddSingleton<IClusterService, ClusterService>();
-                services.AddSingleton<ITagService, ClipTagService>();
-                services.AddSingleton<IModelDownloader, ModelDownloader>();
+                // Library-level extensions encapsulate all concrete registrations
+                services.AddArchiveReader();
+                services.AddVectorStore();
+                services.AddImageClassificationCore();
 
                 // Windows
                 services.AddTransient<MainWindow>();
 
-                // ViewModels — Singleton so MainViewModel and any later resolve share one instance per tab
+                // ViewModels — Singleton so tabs share state
                 services.AddSingleton<MainViewModel>();
                 services.AddSingleton<TrainViewModel>();
                 services.AddSingleton<EvaluateViewModel>();
                 services.AddSingleton<ClassifyViewModel>();
                 services.AddSingleton<AnalyzeViewModel>();
                 services.AddSingleton<SettingsViewModel>();
+                services.AddSingleton<ComicCoverSearchViewModel>();
             });
 }

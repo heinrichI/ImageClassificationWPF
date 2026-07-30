@@ -61,19 +61,6 @@
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
 
-            <!-- Download Progress -->
-            <StackPanel Visibility="{Binding IsDownloading, Converter={StaticResource BoolToVisConverter}}" Margin="0,8,0,0">
-                <TextBlock Text="{Binding DownloadStatusText}" Foreground="Gray" Margin="0,0,0,4"/>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <ProgressBar Grid.Column="0" Value="{Binding DownloadProgress}" Maximum="100" Height="6"/>
-                    <Button Grid.Column="1" Content="Cancel" Command="{Binding CancelDownloadCommand}"
-                            Padding="8,2" Margin="8,0,0,0"/>
-                </Grid>
-            </StackPanel>
 
             <Button Content="Refresh" Command="{Binding RefreshModelsCommand}" Margin="0,12,0,0" Padding="12,4"/>
         </StackPanel>

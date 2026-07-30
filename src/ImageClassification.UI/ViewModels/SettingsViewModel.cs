@@ -10,7 +10,6 @@ namespace ImageClassification.UI.ViewModels;
 public partial class SettingsViewModel : ObservableObject
 {
     private readonly IModelDownloader _downloader;
-    private CancellationTokenSource? _cts;
 
     public SettingsViewModel(IModelDownloader downloader)
     {
@@ -21,9 +20,7 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private int _onnxThreadCount = 4;
     [ObservableProperty] private string _selectedTheme = "Light";
     [ObservableProperty] private bool _useGpuAcceleration = false;
-    [ObservableProperty] private bool _isDownloading;
-    [ObservableProperty] private string _downloadStatusText = string.Empty;
-    [ObservableProperty] private float _downloadProgress;
+
 
     public string[] Themes => new[] { "Light", "Dark" };
     public ObservableCollection<ModelDownloadInfo> AvailableModels { get; } = new();
@@ -43,44 +40,17 @@ public partial class SettingsViewModel : ObservableObject
     {
         if (model == null || model.IsDownloaded) return;
 
-        IsDownloading = true;
-        DownloadStatusText = $"Downloading {model.Name}...";
-        _cts = new CancellationTokenSource();
-
-        var progress = new Progress<int>(p =>
-        {
-            Application.Current.Dispatcher.Invoke(() =>
+        var dialog = new Views.DownloadProgressDialog(
+            $"Downloading {model.Name}...",
+            async (progress, cancellationToken) =>
             {
-                DownloadProgress = p;
-                DownloadStatusText = $"Downloading {model.Name}... {p}%";
+                await _downloader.DownloadModelAsync(model, progress, cancellationToken);
             });
-        });
 
-        try
-        {
-            await _downloader.DownloadModelAsync(model, progress, _cts.Token);
+        dialog.Owner = Application.Current.MainWindow;
+        dialog.ShowDialog();
 
-            Application.Current.Dispatcher.Invoke(() =>
-            {
-                DownloadStatusText = $"Downloaded {model.Name} to {model.LocalPath}";
-                DownloadProgress = 0;
-                RefreshModels();
-            });
-        }
-        catch (OperationCanceledException)
-        {
-            DownloadStatusText = "Download cancelled";
-        }
-        catch (Exception ex)
-        {
-            DownloadStatusText = $"Error: {ex.Message}";
-        }
-        finally
-        {
-            IsDownloading = false;
-        }
+        RefreshModels();
     }
 
-    [RelayCommand]
-    private void CancelDownload() => _cts?.Cancel();
 }

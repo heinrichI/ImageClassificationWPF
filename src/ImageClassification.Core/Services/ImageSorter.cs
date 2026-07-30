@@ -7,7 +7,7 @@ namespace ImageClassification.Core.Services;
 /// Includes timestamp conflict detection to prevent sorting images
 /// that were created within the same time window into different classes.
 /// </summary>
-public class ImageSorter : IImageSorter
+internal sealed class ImageSorter : IImageSorter
 {
     private readonly IImageClassifier _classifier;
 
@@ -17,14 +17,10 @@ public class ImageSorter : IImageSorter
     }
 
     public async Task<List<SortWarning>> DetectTimestampConflictsAsync(
-        string modelPath,
-        string labelFilePath,
         string sourceDirectory,
         int imageSize,
         float timestampWindowMinutes = 1f)
     {
-        await _classifier.LoadModelAsync(modelPath, labelFilePath);
-
         var imageFiles = GetImageFiles(sourceDirectory);
         if (imageFiles.Count == 0) return new List<SortWarning>();
 
@@ -41,8 +37,6 @@ public class ImageSorter : IImageSorter
     }
 
     public async Task<SortResult> SortImagesAsync(
-        string modelPath,
-        string labelFilePath,
         string sourceDirectory,
         float confidenceThreshold,
         int imageSize,
@@ -53,8 +47,6 @@ public class ImageSorter : IImageSorter
         IProgress<SortProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        await _classifier.LoadModelAsync(modelPath, labelFilePath);
-
         var imageFiles = GetImageFiles(sourceDirectory);
         var result = new SortResult { TotalImages = imageFiles.Count };
 

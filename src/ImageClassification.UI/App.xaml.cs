@@ -1,4 +1,5 @@
 using System.Windows;
+using ImageClassification.Core.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 
@@ -16,6 +17,10 @@ public partial class App : Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         await _host.StartAsync();
+
+        // Ensure model files exist on disk (do NOT load into memory)
+        var initializer = _host.Services.GetRequiredService<IAppInitializationService>();
+        await initializer.InitializeAsync();
 
         var mainWindow = _host.Services.GetRequiredService<MainWindow>();
         mainWindow.DataContext = _host.Services.GetRequiredService<ViewModels.MainViewModel>();

@@ -8,13 +8,41 @@ using SixLabors.ImageSharp.Processing;
 
 namespace ImageClassification.Core.Services;
 
-public class OnnxClassifier : IImageClassifier
+internal sealed class OnnxClassifier : IImageClassifier
 {
+    private readonly IModelDownloader _downloader;
     private InferenceSession? _session;
     private string[] _labels = Array.Empty<string>();
     private int _imageSize = 224;
+    private bool _initialized;
+    private Task? _initTask;
+    private readonly object _initLock = new();
 
     public ModelInfo Model { get; private set; } = new();
+
+    public OnnxClassifier(IModelDownloader downloader)
+    {
+        _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+    }
+
+    private Task EnsureInitializedAsync()
+    {
+        if (_initialized) return Task.CompletedTask;
+        lock (_initLock)
+        {
+            if (_initialized) return Task.CompletedTask;
+            _initTask ??= InitializeAsync();
+        }
+        return _initTask;
+    }
+
+    private async Task InitializeAsync()
+    {
+        var modelPath = _downloader.GetModelPath("mobilenet_v2.onnx");
+        var labelsPath = _downloader.GetLabelsPath();
+        await LoadModelAsync(modelPath, labelsPath);
+        _initialized = true;
+    }
 
     public async Task LoadModelAsync(string modelPath, string labelFilePath)
     {
@@ -54,6 +82,7 @@ public class OnnxClassifier : IImageClassifier
 
     public ClassificationResult Classify(string imagePath)
     {
+        EnsureInitializedAsync().GetAwaiter().GetResult();
         ObjectDisposedException.ThrowIf(_session is null, this);
 
         using var image = Image.Load<Rgb24>(imagePath);
@@ -104,6 +133,7 @@ public class OnnxClassifier : IImageClassifier
     public async Task<List<ClassificationResult>> ClassifyBatchAsync(
         List<string> imagePaths, IProgress<int>? progress = null)
     {
+        await EnsureInitializedAsync().ConfigureAwait(false);
         var concurrently = new ConcurrentBag<ClassificationResult>();
 
         await Task.Run(() =>

@@ -26,6 +26,9 @@
             <TabItem Header="  Settings  ">
                 <views:SettingsView DataContext="{Binding Settings}" />
             </TabItem>
+            <TabItem Header="  Comic Search  ">
+                <views:ComicCoverSearchView DataContext="{Binding ComicCoverSearch}" />
+            </TabItem>
         </TabControl>
     </Grid>
 </Window>

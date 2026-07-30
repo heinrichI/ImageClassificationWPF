@@ -1,72 +1,129 @@
 # Image Classification WPF
 
-WPF MVVM приложение для классификации и сортировки изображений с использованием современных архитектур CNN.
+WPF MVVM application for image classification, sorting, and semantic search using modern CNN architectures and CLIP embeddings.
 
-## Архитектура
+Built with **Dependency Inversion (DIP)** — all cross-project dependencies go through interfaces. Implementations are `internal`, exposed only via `ServiceCollectionExtensions`.
 
-Приложение построено по принципу **Dependency Inversion (DIP)** с полной инверсией зависимостей через `Microsoft.Extensions.DependencyInjection`.
+## Architecture
 
 ```
-ImageClassification.Core          — бизнес-логика, модели, сервисы
-ImageClassification.UI            — WPF интерфейс (MVVM + CommunityToolkit)
-ImageClassification.Tests         — unit-тесты (xUnit + Moq)
+ImageClassification.ArchiveReader   — CBZ/CBR archive extraction (IArchiveReader, AddArchiveReader())
+ImageClassification.VectorStore     — SQLite vector embedding cache (IVectorStore, AddVectorStore())
+ImageClassification.Core            — Business logic, models, services (AddImageClassificationCore())
+ImageClassification.UI              — WPF shell (MVVM + CommunityToolkit)
+ImageClassification.Tests           — xUnit + Moq
 ```
 
-### Поддерживаемые модели
+Dependency flow: `UI → Core → (ArchiveReader, VectorStore)` — UI knows only interfaces, never concrete types.
 
-| Модель | Top-1 ImageNet | Параметры | Размер | Рекомендация |
-|--------|---------------|-----------|--------|--------------|
-| **EfficientNet-B0** | 78.57% | 5.3M | 21 MB | Лучшая точность/размер |
-| **EfficientNet-B1** | 80.40% | 7.8M | 31 MB | По умолчанию |
-| **EfficientNetV2-S** | 83.90% | 21.5M | 86 MB | Максимальная точность |
-| **ConvNeXt-Tiny** | 82.07% | 28.6M | 114 MB | Современная CNN |
-| **MobileNetV3-Large** | 75.51% | 5.5M | 22 MB | Самая быстрая |
+## Prerequisites
 
-## Скачивание моделей
+- [.NET 8 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
+- ONNX Runtime (included via NuGet)
+- Models: download via UI (**Settings → Download Models**) or manually (see below)
 
-### Встроенный загрузчик (рекомендуется)
+## Build & Run
 
-Откройте вкладку **Settings → Download Models** и нажмите "Download" напротив нужной модели.
+```bash
+dotnet restore
+dotnet build
+dotnet run --project src/ImageClassification.UI
+```
 
-### Ручное скачивание
+## Test
 
-| Модель | Источник | Ссылка |
-|--------|----------|--------|
-| EfficientNet-B0 | ONNX Model Zoo | https://github.com/onnx/models/tree/main/validated/vision/classification/efficientnet-lite4 |
-| MobileNetV2 | ONNX Model Zoo | https://github.com/onnx/models/tree/main/validated/vision/classification/mobilenet |
-| CLIP ViT-B/32 | Hugging Face | https://huggingface.co/openai/clip-vit-base-patch32 |
+```bash
+dotnet test src/ImageClassification.Tests
+```
 
-### Экспорт из PyTorch (для всех архитектур)
+Integration tests (require real ONNX model files) are skipped by default. Run them manually:
+```bash
+dotnet test --filter "FullyQualifiedName~IntegrationTest"
+```
+
+## Features
+
+### Training (Tab 1)
+| Model | Top-1 ImageNet | Params | Size | Best for |
+|---|---|---|---|---|
+| **EfficientNet-B0** | 78.57% | 5.3M | 21 MB | Accuracy/size ratio |
+| **EfficientNet-B1** | 80.40% | 7.8M | 31 MB | Default |
+| **EfficientNetV2-S** | 83.90% | 21.5M | 86 MB | Max accuracy |
+| **ConvNeXt-Tiny** | 82.07% | 28.6M | 114 MB | Modern CNN |
+| **MobileNetV3-Large** | 75.51% | 5.5M | 22 MB | Fastest |
+
+- Hyper-parameters: batch size, epochs, learning rate, weight decay
+- Augmentation: TrivialAugment + MixUp + CutMix + Label Smoothing
+- LR schedule: Cosine Annealing + 5-epoch warmup
+- Transfer learning: progressive unfreezing (head → last blocks → full fine-tune)
+
+### Evaluation (Tab 2)
+- Load a trained `.onnx` model
+- Evaluate on test set (subfolder-per-class)
+- Per-class accuracy, precision, recall, F1
+
+### Classify & Sort (Tab 3)
+- Batch classify with confidence threshold
+- Auto-sort images into class-named subfolders
+- Progress bar + processing log
+
+### Analyze (Tab 4)
+- **Auto-Cluster**: k-means clustering without predefined labels
+  - Auto-determine cluster count (silhouette score)
+  - Editable cluster names
+  - Sort files into clusters
+- **By Tags**: CLIP zero-shot tag generation
+  - Multi-line candidate tag input
+  - Image preview with tag checkboxes
+  - Edit and filter tags before sorting
+
+### Comic Cover Search (Tab 6)
+- Search CBZ/CBR comic archives by semantic description
+- Uses CLIP ViT-B/32 ONNX model for text + image embeddings
+- Results ranked by cosine similarity (raw CLIP score)
+- Adjustable similarity threshold (default 0.25)
+- Score distribution shown in status bar
+
+### Settings (Tab 5)
+- ONNX Runtime thread count
+- Light/Dark theme
+- GPU acceleration (CUDA)
+- Built-in model downloader with progress bar
+
+## Model Setup
+
+### Built-in downloader (recommended)
+
+Open **Settings → Download Models** and click "Download" for each model.
+
+### Manual download
+
+| Model | Source |
+|---|---|
+| EfficientNet-B0 | [ONNX Model Zoo](https://github.com/onnx/models/tree/main/validated/vision/classification/efficientnet-lite4) |
+| MobileNetV2 | [ONNX Model Zoo](https://github.com/onnx/models/tree/main/validated/vision/classification/mobilenet) |
+| CLIP ViT-B/32 | [Hugging Face](https://huggingface.co/openai/clip-vit-base-patch32) |
+
+### PyTorch → ONNX export
 
 ```python
-# Установка: pip install torch torchvision onnx
+# pip install torch torchvision onnx transformers
 import torch
 import torchvision.models as models
 
-# Выберите модель:
-model = models.efficientnet_b0(pretrained=True)      # EfficientNet-B0
-# model = models.efficientnet_b1(pretrained=True)     # EfficientNet-B1
-# model = models.efficientnet_v2_s(pretrained=True)   # EfficientNetV2-S
-# model = models.convnext_tiny(pretrained=True)        # ConvNeXt-Tiny
-# model = models.mobilenet_v3_large(pretrained=True)   # MobileNetV3-Large
-
+model = models.efficientnet_b0(pretrained=True)
 model.eval()
 
-# Экспорт в ONNX
 dummy = torch.randn(1, 3, 224, 224)
 torch.onnx.export(model, dummy, "model.onnx",
-                  input_names=["input"],
-                  output_names=["output"],
-                  dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
-                  opset_version=17)
-
-print("Model exported to model.onnx")
+    input_names=["input"], output_names=["output"],
+    dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+    opset_version=17)
 ```
 
-### CLIP для генерации тегов
+### CLIP ONNX export
 
 ```python
-# Установка: pip install transformers onnx
 from transformers import CLIPModel
 
 model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
@@ -76,129 +133,85 @@ dummy_image = torch.randn(1, 3, 224, 224)
 dummy_text = torch.randint(0, 49408, (1, 77))
 
 torch.onnx.export(model, (dummy_image, dummy_text), "clip_vit_b32.onnx",
-                  input_names=["pixel_values", "input_ids"],
-                  output_names=["image_embeds", "text_embeds"],
-                  opset_version=17)
+    input_names=["pixel_values", "input_ids"],
+    output_names=["image_embeds", "text_embeds"],
+    opset_version=17)
 ```
 
-### Куда сохранять модели
+Models are stored at: `%APPDATA%/ImageClassification/models/` (Windows) or `./models/` (local).
 
-Приложение автоматически использует папку: `%APPDATA%/ImageClassification/models/`
+## Tech Stack
 
-Также можно указать путь к модели вручную на вкладках Training, Evaluation, Classify & Sort, Analyze.
-
-## Тренировочный пайплайн (исследовано и оптимизировано)
-
-- **Оптимизатор**: AdamW (lr=1e-3, weight_decay=0.01)
-- **Аугментация**: TrivialAugment + MixUp (alpha=0.2) + CutMix (alpha=1.0)
-- **Регуляризация**: Label Smoothing (epsilon=0.1)
-- **LR Schedule**: Cosine Annealing + 5-epoch warmup
-- **Transfer Learning**: Progressive unfreezing (head → последние блоки → полный fine-tune)
-
-### Стек технологий
-
-| Компонент | Библиотека |
-|-----------|-----------|
+| Component | Library |
+|---|---|
 | UI Framework | WPF (.NET 8) |
 | MVVM | CommunityToolkit.Mvvm 8.4 |
-| ML — обучение | TorchSharp (PyTorch в C#) |
-| ML — inference | Microsoft.ML.OnnxRuntime |
-| Изображения | SixLabors.ImageSharp |
-| Диаграммы | LiveChartsCore.SkiaSharpView |
+| ML — training | TorchSharp 0.103 |
+| ML — inference | Microsoft.ML.OnnxRuntime 1.17 |
+| Image processing | SixLabors.ImageSharp 3.1 |
+| Charts | LiveChartsCore.SkiaSharpView |
 | DI | Microsoft.Extensions.DependencyInjection |
-| Тесты | xUnit + Moq |
+| Archive reader | SevenZipExtractor |
+| Vector cache | Microsoft.Data.Sqlite |
+| Unit tests | xUnit + Moq |
 
-## Сборка
-
-```bash
-dotnet restore --source https://api.nuget.org/v3/index.json
-dotnet build
-```
-
-## Структура проекта
+## Project Structure
 
 ```
 src/
+├── ImageClassification.ArchiveReader/
+│   ├── IArchiveReader.cs            — public interface
+│   ├── ArchiveReader.cs             — internal implementation
+│   └── ServiceCollectionExtensions.cs — AddArchiveReader()
+│
+├── ImageClassification.VectorStore/
+│   ├── IVectorStore.cs              — public interface
+│   ├── SqliteVectorStore.cs         — internal implementation
+│   └── ServiceCollectionExtensions.cs — AddVectorStore()
+│
 ├── ImageClassification.Core/
-│   ├── Models/              — доменные модели и DTO
-│   ├── Services/            — интерфейсы + реализации (DIP)
-│   │   ├── IImageClassifier → OnnxClassifier
-│   │   ├── IModelTrainer    → TorchSharpTrainer
-│   │   ├── IModelEvaluator → ModelEvaluator
-│   │   ├── IImageSorter     → ImageSorter
-│   │   ├── IImageFeatureExtractor → ImageFeatureExtractor
-│   │   ├── IClusterService  → ClusterService
-│   │   ├── ITagService      → ClipTagService
-│   │   └── IModelDownloader → ModelDownloader
-│   └── Helpers/             — утилиты для работы с изображениями
+│   ├── Models/                      — domain models & DTOs (public)
+│   ├── Services/
+│   │   ├── I*.cs                    — public interfaces
+│   │   ├── *.cs                     — internal implementations
+│   │   └── ServiceCollectionExtensions.cs — AddImageClassificationCore()
+│   └── Helpers/
 │
 ├── ImageClassification.UI/
-│   ├── ViewModels/          — MVVM ViewModels (constructor injection)
-│   ├── Views/               — XAML представления (5 вкладок)
-│   ├── Converters/          — value converters
-│   └── AppServiceFactory.cs — DI-контейнер
+│   ├── AppServiceFactory.cs         — DI composition root (calls AddXxx() only)
+│   ├── ViewModels/                  — MVVM ViewModels
+│   ├── Views/                       — XAML views
+│   └── Converters/                  — value converters
 │
 └── ImageClassification.Tests/
+    ├── Models/                      — model unit tests
+    └── Services/                    — service unit + integration tests
 ```
 
-## DI-контейнер
+## DI Registration
 
-Все зависимости регистрируются через интерфейсы в `AppServiceFactory.cs`:
+All registrations are encapsulated in library-level extension methods. The UI composition root only calls these:
 
 ```csharp
-services.AddSingleton<IImageClassifier, OnnxClassifier>();
-services.AddSingleton<IModelTrainer, TorchSharpTrainer>();
-services.AddSingleton<IModelEvaluator, ModelEvaluator>();
-services.AddSingleton<IImageSorter, ImageSorter>();
-services.AddSingleton<IImageFeatureExtractor, ImageFeatureExtractor>();
-services.AddSingleton<IClusterService, ClusterService>();
-services.AddSingleton<ITagService, ClipTagService>();
-services.AddSingleton<IModelDownloader, ModelDownloader>();
+services.AddArchiveReader();        // from ArchiveReader
+services.AddVectorStore();          // from VectorStore
+services.AddImageClassificationCore(); // from Core
+
+// ViewModels and Window (UI-specific, not in library)
+services.AddSingleton<MainViewModel>();
+services.AddTransient<MainWindow>();
 ```
 
-## Функциональность
+See [`AGENTS.md`](AGENTS.md) for full DIP conventions.
 
-### Training (вкладка 1)
-- Выбор архитектуры из 5 моделей
-- Настройка гиперпараметров: batch size, epochs, learning rate, weight decay
-- Аугментация: TrivialAugment, MixUp, CutMix, Label Smoothing
-- Transfer Learning: progressive unfreezing, ImageNet-21k веса
-- Прогресс-бар и таблица метрик по эпохам
+## Training Pipeline
 
-### Evaluation (вкладка 2)
-- Загрузка .onnx модели
-- Оценка на тестовом наборе с подпапками классов
-- Точность, Precision, Recall, F1 по каждому классу
+- **Optimizer**: AdamW (lr=1e-3, weight_decay=0.01)
+- **Augmentation**: TrivialAugment + MixUp (alpha=0.2) + CutMix (alpha=1.0)
+- **Regularization**: Label Smoothing (epsilon=0.1)
+- **LR Schedule**: Cosine Annealing + 5-epoch warmup
+- **Transfer Learning**: Progressive unfreezing
 
-### Classify & Sort (вкладка 3)
-- Классификация изображений с порогом уверенности
-- Автоматическая сортировка в подпапки по классам
-- Прогресс и лог обработки
-
-### Analyze (вкладка 4)
-- **Auto-Cluster**: k-means кластеризация без предопределённых меток
-  - Автоопределение количества кластеров (silhouette score)
-  - Редактируемые имена кластеров
-  - Сортировка по кластерам
-- **By Tags**: CLIP zero-shot генерация тегов
-  - Multi-line TextBox для кандидатных тегов
-  - Превью изображений с тегами и чекбоксами
-  - Редактирование и фильтрация тегов перед сортировкой
-
-### Settings (вкладка 5)
-- Количество потоков ONNX Runtime
-- Выбор темы (Light/Dark)
-- GPU ускорение (CUDA)
-- **Загрузка моделей**: встроенный загрузчик с прогресс-баром
-
-## Исследование
-
-В папке `research/cnn-models-comparison/` находится полный отчёт с анализом архитектур и сравнением бенчмарков. Ключевые выводы:
-
-- Текущие модели (MobileNetV2, InceptionV3, InceptionResNetV2, NASNetLarge) **устарели** и заменены на EfficientNet/ConvNeXt
-- Для <1000 изображений на класс эффективнее средние модели (EfficientNet-B0/B1), чем крупные (NASNetLarge)
-- Тренировочный пайплайн с AdamW + TrivialAugment + Cosine Annealing даёт **+2-5%** к точности
-
-## Лицензия
+## License
 
 MIT

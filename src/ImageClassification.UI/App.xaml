@@ -9,5 +9,8 @@
         <converters:ImagePathToImageConverter x:Key="ImagePathToImageConverter"/>
         <converters:InvertBoolVisConverter x:Key="InvertBoolVisConverter"/>
         <converters:CountToVisConverter x:Key="CountToVisConverter"/>
+        <converters:NonEmptyStringToVisibilityConverter x:Key="NonEmptyStringToVisibilityConverter"/>
+        <converters:ZeroToBoolConverter x:Key="ZeroToBoolConverter"/>
+        <converters:ScoreToBrushConverter x:Key="ScoreToBrushConverter"/>
     </Application.Resources>
 </Application>

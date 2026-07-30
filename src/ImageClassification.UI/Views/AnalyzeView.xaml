@@ -41,18 +41,6 @@
 
             <!-- Cluster Mode Settings -->
             <StackPanel Visibility="{Binding IsClusterMode, Converter={StaticResource BoolToVisConverter}}">
-                <Grid Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                        <TextBlock Text="Model Path (.onnx):" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding ModelPath, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="True"/>
-                    </StackPanel>
-                    <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseModelCommand}" VerticalAlignment="Bottom" Padding="12,6"/>
-                </Grid>
-
                 <CheckBox Content="Auto-detect number of clusters" IsChecked="{Binding AutoDetectClusters}" Margin="0,4"/>
                 <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                     <TextBlock Text="Number of clusters:" VerticalAlignment="Center" Margin="0,0,8,0"/>
@@ -63,18 +51,6 @@
 
             <!-- Tag Mode Settings -->
             <StackPanel Visibility="{Binding IsClusterMode, Converter={StaticResource InvertBoolConverter}}">
-                <Grid Margin="0,0,0,8">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                        <TextBlock Text="CLIP Model Path (.onnx):" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding ClipModelPath, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="True"/>
-                    </StackPanel>
-                    <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseClipModelCommand}" VerticalAlignment="Bottom" Padding="12,6"/>
-                </Grid>
-
                 <TextBlock Text="Candidate Tags (comma-separated):" Margin="0,0,0,4"/>
                 <TextBox Text="{Binding CandidateTags, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True"
                          TextWrapping="Wrap" Height="60" VerticalScrollBarVisibility="Auto" Margin="0,0,0,8"/>

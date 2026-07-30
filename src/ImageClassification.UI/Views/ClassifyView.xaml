@@ -18,31 +18,7 @@
         <StackPanel Grid.Row="0" Margin="0,0,0,16">
             <TextBlock Text="Classify &amp; Sort Images" FontWeight="Bold" FontSize="16" Margin="0,0,0,12"/>
 
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                    <TextBlock Text="Model Path (.onnx):" Margin="0,0,0,4"/>
-                    <TextBox Text="{Binding ModelPath, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="True"/>
-                </StackPanel>
-                <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseModelCommand}" VerticalAlignment="Bottom" Padding="12,6"/>
-            </Grid>
-
-            <Grid Margin="0,8,0,0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                    <TextBlock Text="Label File (.txt):" Margin="0,0,0,4"/>
-                    <TextBox Text="{Binding LabelFilePath, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="True"/>
-                </StackPanel>
-                <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseLabelsCommand}" VerticalAlignment="Bottom" Padding="12,6"/>
-            </Grid>
-
-            <Grid Margin="0,8,0,0">
+            <Grid Margin="0,0,0,8">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>

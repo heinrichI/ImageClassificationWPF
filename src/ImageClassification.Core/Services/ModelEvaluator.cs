@@ -6,7 +6,7 @@ namespace ImageClassification.Core.Services;
 /// Evaluates model accuracy on a test directory with class subfolders.
 /// Depends on IImageClassifier (DIP) — does not create classifier internally.
 /// </summary>
-public class ModelEvaluator : IModelEvaluator
+internal sealed class ModelEvaluator : IModelEvaluator
 {
     private readonly IImageClassifier _classifier;
 
@@ -16,7 +16,6 @@ public class ModelEvaluator : IModelEvaluator
     }
 
     public async Task<EvaluationResult> EvaluateAsync(
-        string modelPath,
         string testDirectory,
         int imageSize,
         int batchSize,
@@ -25,12 +24,6 @@ public class ModelEvaluator : IModelEvaluator
         var classDirs = Directory.GetDirectories(testDirectory);
         var classLabels = classDirs.Select(d => Path.GetFileName(d)).ToArray();
         int numClasses = classLabels.Length;
-
-        var labelPath = Path.ChangeExtension(modelPath, ".labels.txt");
-        if (!File.Exists(labelPath))
-            labelPath = modelPath + ".labels.txt";
-
-        await _classifier.LoadModelAsync(modelPath, labelPath);
 
         var allImages = new List<(string Path, string TrueLabel)>();
         foreach (var classDir in classDirs)
