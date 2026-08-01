@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 using SixLabors.ImageSharp;
@@ -16,15 +17,17 @@ internal sealed class ClipImageEncoder : IClipImageEncoder
     private const int EmbeddingDim = 512;
 
     private readonly IModelDownloader _downloader;
+    private readonly ILogger<BatchImageEncoder> _logger;
     private InferenceSession? _session;
     private int _imageSize = 224;
     private bool _initialized;
     private Task? _initTask;
     private readonly object _initLock = new();
 
-    public ClipImageEncoder(IModelDownloader downloader)
+    public ClipImageEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _logger = logger;
     }
 
     private Task EnsureInitializedAsync()
@@ -51,10 +54,18 @@ internal sealed class ClipImageEncoder : IClipImageEncoder
 
         var sessionOptions = new SessionOptions
         {
-            InterOpNumThreads = 4,
-            IntraOpNumThreads = 4,
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        try
+        {
+            sessionOptions.AppendExecutionProvider_CUDA();
+        }
+        catch (Exception ex)
+        {
+            // CUDA not available — fall back to CPU
+            _logger.LogWarning($"ClipImageEncoder: CUDA unavailable, falling back to CPU {ex.Message}");
+        }
 
         _session = new InferenceSession(modelPath, sessionOptions);
 

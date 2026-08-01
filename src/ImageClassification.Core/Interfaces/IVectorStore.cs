@@ -19,6 +19,13 @@ public interface IVectorStore : IDisposable
                             DateTime lastModified, long fileSize);
 
     /// <summary>
+    /// Batch version of GetAsync — returns embeddings for multiple files in one round-trip.
+    /// The returned dictionary contains a null entry for any file that was not found or is stale.
+    /// </summary>
+    Task<Dictionary<string, float[]?>> GetBatchAsync(string modelName,
+        List<(string FilePath, DateTime LastModified, long FileSize)> entries);
+
+    /// <summary>
     /// Clears all cached embeddings, optionally scoped to a single model.
     /// </summary>
     Task ClearAsync(string? modelName = null);

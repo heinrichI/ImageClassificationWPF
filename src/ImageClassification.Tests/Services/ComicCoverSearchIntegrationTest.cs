@@ -16,18 +16,21 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
     private readonly ImageClassification.ArchiveReader.ArchiveReader _archiveReader;
     private readonly ILogger<ComicCoverSearchService> _logger;
     private readonly ModelDownloader _downloader;
-    private readonly ClipImageEncoder _clipImageEncoder;
     private readonly ClipTextEncoder _clipTextEncoder;
     private readonly SqliteVectorStore _vectorStore;
+    private readonly BatchImageEncoder _batchEncoder;
 
     public ComicCoverSearchIntegrationTest()
     {
         _archiveReader = new ImageClassification.ArchiveReader.ArchiveReader();
         _logger = NullLogger<ComicCoverSearchService>.Instance;
         _downloader = new ModelDownloader();
-        _clipImageEncoder = new ClipImageEncoder(_downloader);
-        _clipTextEncoder = new ClipTextEncoder(_downloader);
+        _clipTextEncoder = new ClipTextEncoder(_downloader, NullLogger<BatchImageEncoder>.Instance);
         _vectorStore = new SqliteVectorStore();
+        _batchEncoder = new BatchImageEncoder(
+            _downloader,
+            new BatchImageEncoderSettings { BatchSize = 32 },
+            NullLogger<BatchImageEncoder>.Instance);
     }
 
     [Fact(Skip = "Integration test — requires real CLIP ONNX model, BPE vocabulary, and .cbr file")]
@@ -39,7 +42,7 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         Assert.True(File.Exists(comicPath), $"Comic file not found: {comicPath}");
 
         var service = new ComicCoverSearchService(
-            _archiveReader, _clipImageEncoder, _clipTextEncoder, _vectorStore, _logger);
+            _archiveReader, _clipTextEncoder, _vectorStore, _batchEncoder, _logger);
 
         var dir = Path.GetDirectoryName(comicPath)!;
 
@@ -78,7 +81,7 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         Assert.True(File.Exists(comicPath), $"Comic file not found: {comicPath}");
 
         var service = new ComicCoverSearchService(
-            _archiveReader, _clipImageEncoder, _clipTextEncoder, _vectorStore, _logger);
+            _archiveReader, _clipTextEncoder, _vectorStore, _batchEncoder, _logger);
 
         var dir = Path.GetDirectoryName(comicPath)!;
 
@@ -107,7 +110,7 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         Assert.True(Directory.Exists(dir), $"Directory not found: {dir}");
 
         var service = new ComicCoverSearchService(
-            _archiveReader, _clipImageEncoder, _clipTextEncoder, _vectorStore, _logger);
+            _archiveReader, _clipTextEncoder, _vectorStore, _batchEncoder, _logger);
 
         // Act
         var results = await service.SearchAsync(dir, "beach");
@@ -162,8 +165,8 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
     public void Dispose()
     {
         _archiveReader.Dispose();
-        _clipImageEncoder.Dispose();
         _clipTextEncoder.Dispose();
+        _batchEncoder.Dispose();
         _vectorStore.Dispose();
     }
 }

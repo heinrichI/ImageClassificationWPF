@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
 
@@ -14,15 +15,17 @@ internal sealed class ClipTextEncoder : IClipTextEncoder
     private const int EmbeddingDim = 512;
 
     private readonly IModelDownloader _downloader;
+    private readonly ILogger<BatchImageEncoder> _logger;
     private ClipBpeTokenizer? _tokenizer;
     private InferenceSession? _session;
     private bool _initialized;
     private Task? _initTask;
     private readonly object _initLock = new();
 
-    public ClipTextEncoder(IModelDownloader downloader)
+    public ClipTextEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _logger = logger;
     }
 
     private Task EnsureInitializedAsync()
@@ -52,10 +55,18 @@ internal sealed class ClipTextEncoder : IClipTextEncoder
 
         var sessionOptions = new SessionOptions
         {
-            InterOpNumThreads = 4,
-            IntraOpNumThreads = 4,
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        try
+        {
+            sessionOptions.AppendExecutionProvider_CUDA();
+        }
+        catch(Exception ex)
+        {
+            // CUDA not available — fall back to CPU
+            _logger.LogWarning($"ClipTextEncoder: CUDA unavailable, falling back to CPU {ex.Message}");
+        }
 
         _session = new InferenceSession(modelPath, sessionOptions);
         await Task.CompletedTask;

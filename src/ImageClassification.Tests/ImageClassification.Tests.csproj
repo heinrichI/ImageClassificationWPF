@@ -18,6 +18,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\ImageClassification.Core\ImageClassification.Core.csproj" />
+    <ProjectReference Include="..\ImageClassification.ArchiveReader\ImageClassification.ArchiveReader.csproj" />
+    <ProjectReference Include="..\ImageClassification.VectorStore\ImageClassification.VectorStore.csproj" />
+    <ProjectReference Include="..\ImageClassification.UI\ImageClassification.UI.csproj" />
   </ItemGroup>
 
   <ItemGroup>

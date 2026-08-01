@@ -19,4 +19,13 @@ public class ComicCoverResult
 
     /// <summary>Formatted similarity percentage for display.</summary>
     public string SimilarityText => $"{SimilarityScore:P1}";
+
+    /// <summary>Zero-based page index within the archive (0 = first page).</summary>
+    public int PageIndex { get; set; }
+
+    /// <summary>Total number of image pages in the archive.</summary>
+    public int PageCount { get; set; }
+
+    /// <summary>Display label for the page (e.g. "Page 1 of 61").</summary>
+    public string PageLabel => PageCount > 0 ? $"Page {PageIndex + 1} of {PageCount}" : string.Empty;
 }

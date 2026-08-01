@@ -14,7 +14,8 @@ public static class CoreServiceCollectionExtensions
     public static IServiceCollection AddImageClassificationCore(this IServiceCollection services)
     {
         // ML services
-        services.AddSingleton<IImageClassifier, OnnxClassifier>();
+        services.AddSingleton<OnnxClassifier>();
+        services.AddSingleton<IImageClassifier, CachedImageClassifier>();
         services.AddSingleton<IModelTrainer, TorchSharpTrainer>();
         services.AddSingleton<IModelEvaluator, ModelEvaluator>();
         services.AddSingleton<IImageSorter, ImageSorter>();
@@ -23,6 +24,7 @@ public static class CoreServiceCollectionExtensions
         services.AddSingleton<ImageFeatureExtractor>();
         services.AddSingleton<ClipImageEncoder>();
         services.AddSingleton<ClipTextEncoder>();
+        services.AddSingleton<BatchImageEncoder>();
 
         // Public-facing interface → cached decorator
         services.AddSingleton<IClipImageEncoder, CachedClipImageEncoder>();

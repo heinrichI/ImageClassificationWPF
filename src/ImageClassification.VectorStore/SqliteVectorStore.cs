@@ -1,7 +1,5 @@
-using System.Data.Common;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
-using ImageClassification.Core.Services;
 using ImageClassification.Core.Interfaces;
 
 namespace ImageClassification.VectorStore;
@@ -9,32 +7,40 @@ namespace ImageClassification.VectorStore;
 /// <summary>
 /// SQLite-based vector embedding cache.
 /// Stores float[] as BLOB: 4-byte LE int32 (dim) + dim*4 bytes of float data.
-/// All public methods are serialized via SemaphoreSlim because SqliteConnection
-/// is not thread-safe (shared _commands list modified on CreateCommand/Dispose).
+/// Uses SqliteConnectionPool so that concurrent reads do not block each other.
 /// </summary>
 internal sealed class SqliteVectorStore : IVectorStore
 {
-    private readonly string _dbPath;
-    private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly SqliteConnectionPool _pool;
     private readonly ILogger<SqliteVectorStore>? _logger;
-    private SqliteConnection? _connection;
     private bool _disposed;
 
     public SqliteVectorStore(string? dbPath = null, ILogger<SqliteVectorStore>? logger = null)
     {
-        _dbPath = dbPath ?? Path.Combine(
+        var path = dbPath ?? Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
             "vector_cache.db");
+        _pool = new SqliteConnectionPool(path);
+        _logger = logger;
+        Initialize();
+    }
+
+    /// <summary>
+    /// Internal constructor for testing — allows injecting a pre-built pool.
+    /// </summary>
+    internal SqliteVectorStore(SqliteConnectionPool pool, ILogger<SqliteVectorStore>? logger = null)
+    {
+        _pool = pool ?? throw new ArgumentNullException(nameof(pool));
         _logger = logger;
         Initialize();
     }
 
     public void Initialize()
     {
-        _lock.Wait();
+        var conn = _pool.Rent();
         try
         {
-            using var cmd = CreateCommand(@"
+            using var cmd = new SqliteCommand(@"
                 CREATE TABLE IF NOT EXISTS embeddings (
                     model_name    TEXT    NOT NULL,
                     file_path     TEXT    NOT NULL,
@@ -44,29 +50,32 @@ internal sealed class SqliteVectorStore : IVectorStore
                     created_at    TEXT    NOT NULL,
                     PRIMARY KEY (model_name, file_path)
                 )");
+            cmd.Connection = conn;
             cmd.ExecuteNonQuery();
 
             // Enable WAL mode for better concurrent reads
-            using var wal = CreateCommand("PRAGMA journal_mode=WAL;");
+            using var wal = new SqliteCommand("PRAGMA journal_mode=WAL;");
+            wal.Connection = conn;
             wal.ExecuteNonQuery();
         }
         finally
         {
-            _lock.Release();
+            _pool.Return(conn);
         }
     }
 
     public async Task SaveAsync(string modelName, string filePath,
         DateTime lastModified, long fileSize, float[] embedding)
     {
-        await _lock.WaitAsync().ConfigureAwait(false);
+        var conn = _pool.Rent();
         try
         {
-            using var cmd = CreateCommand(@"
+            using var cmd = new SqliteCommand(@"
                 INSERT OR REPLACE INTO embeddings
                     (model_name, file_path, last_modified, file_size, embedding, created_at)
                 VALUES (@mn, @fp, @lm, @fs, @emb, @ca)");
 
+            cmd.Connection = conn;
             cmd.Parameters.AddWithValue("@mn", modelName);
             cmd.Parameters.AddWithValue("@fp", filePath);
             cmd.Parameters.AddWithValue("@lm", lastModified.ToString("O"));
@@ -78,23 +87,22 @@ internal sealed class SqliteVectorStore : IVectorStore
         }
         finally
         {
-            _lock.Release();
+            _pool.Return(conn);
         }
     }
 
     public async Task<float[]?> GetAsync(string modelName, string filePath,
         DateTime lastModified, long fileSize)
     {
-        await _lock.WaitAsync().ConfigureAwait(false);
+        var conn = _pool.Rent();
         try
         {
-            var currentLm = lastModified.ToString("O");
-
-            using var cmd = CreateCommand(@"
+            using var cmd = new SqliteCommand(@"
                 SELECT embedding, last_modified, file_size
                 FROM embeddings
                 WHERE model_name = @mn AND file_path = @fp");
 
+            cmd.Connection = conn;
             cmd.Parameters.AddWithValue("@mn", modelName);
             cmd.Parameters.AddWithValue("@fp", filePath);
 
@@ -103,6 +111,7 @@ internal sealed class SqliteVectorStore : IVectorStore
             {
                 var storedLm = reader.GetString(1);
                 var storedFs = reader.GetInt64(2);
+                var currentLm = lastModified.ToString("O");
 
                 if (storedLm == currentLm && storedFs == fileSize)
                     return Deserialize(reader.GetFieldValue<byte[]>(0));
@@ -123,19 +132,82 @@ internal sealed class SqliteVectorStore : IVectorStore
         }
         finally
         {
-            _lock.Release();
+            _pool.Return(conn);
         }
+    }
+
+    public async Task<Dictionary<string, float[]?>> GetBatchAsync(string modelName,
+        List<(string FilePath, DateTime LastModified, long FileSize)> entries)
+    {
+        var results = new Dictionary<string, float[]?>(entries.Count);
+        foreach (var (path, _, _) in entries)
+            results[path] = null;
+
+        if (entries.Count == 0)
+            return results;
+
+        var conn = _pool.Rent();
+        try
+        {
+            // Build parameterised IN clause
+            var paramNames = new List<string>(entries.Count);
+            var cmd = new SqliteCommand();
+            cmd.Connection = conn;
+
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var pName = $"@fp{i}";
+                paramNames.Add(pName);
+                cmd.Parameters.AddWithValue(pName, entries[i].FilePath);
+            }
+
+            cmd.CommandText = "SELECT file_path, embedding, last_modified, file_size " +
+                "FROM embeddings " +
+                $"WHERE model_name = @mn AND file_path IN ({string.Join(",", paramNames)})";
+
+            cmd.Parameters.AddWithValue("@mn", modelName);
+
+            using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                var filePath = reader.GetString(0);
+                var storedLm = reader.GetString(2);
+                var storedFs = reader.GetInt64(3);
+
+                var entryIndex = entries.FindIndex(e => e.FilePath == filePath);
+                if (entryIndex < 0) continue;
+
+                var (_, currentLm, currentFs) = entries[entryIndex];
+                if (storedLm == currentLm.ToString("O") && storedFs == currentFs)
+                {
+                    results[filePath] = Deserialize(reader.GetFieldValue<byte[]>(1));
+                }
+                else
+                {
+                    _logger?.LogDebug(
+                        "Stale (batch): {ModelName}/{FilePath}", modelName, filePath);
+                }
+            }
+        }
+        finally
+        {
+            _pool.Return(conn);
+        }
+
+        return results;
     }
 
     public async Task ClearAsync(string? modelName = null)
     {
-        await _lock.WaitAsync().ConfigureAwait(false);
+        var conn = _pool.Rent();
         try
         {
-            using var cmd = CreateCommand(modelName is null
-                ? "DELETE FROM embeddings"
-                : "DELETE FROM embeddings WHERE model_name = @mn");
+            using var cmd = new SqliteCommand(
+                modelName is null
+                    ? "DELETE FROM embeddings"
+                    : "DELETE FROM embeddings WHERE model_name = @mn");
 
+            cmd.Connection = conn;
             if (modelName is not null)
                 cmd.Parameters.AddWithValue("@mn", modelName);
 
@@ -143,7 +215,7 @@ internal sealed class SqliteVectorStore : IVectorStore
         }
         finally
         {
-            _lock.Release();
+            _pool.Return(conn);
         }
     }
 
@@ -151,35 +223,11 @@ internal sealed class SqliteVectorStore : IVectorStore
     {
         if (_disposed) return;
         _disposed = true;
-        _lock.Dispose();
-        _connection?.Dispose();
-        _connection = null;
+        _pool.Dispose();
         GC.SuppressFinalize(this);
     }
 
-    // ─── Internal helpers ───
-
-    private SqliteConnection EnsureConnection()
-    {
-        if (_connection is not null && _connection.State == System.Data.ConnectionState.Open)
-            return _connection;
-
-        _connection?.Dispose();
-
-        var dir = Path.GetDirectoryName(_dbPath);
-        if (!string.IsNullOrEmpty(dir))
-            Directory.CreateDirectory(dir);
-
-        _connection = new SqliteConnection($"Data Source={_dbPath}");
-        _connection.Open();
-
-        return _connection;
-    }
-
-    private SqliteCommand CreateCommand(string sql)
-    {
-        return new SqliteCommand(sql, EnsureConnection());
-    }
+    // ─── Serialisation helpers ───
 
     private static byte[] Serialize(float[] vector)
     {
@@ -187,17 +235,11 @@ internal sealed class SqliteVectorStore : IVectorStore
         int totalBytes = 4 + dim * 4;
         var bytes = new byte[totalBytes];
 
-        // Write dimension as LE int32
         var dimBytes = BitConverter.GetBytes(dim);
-        if (BitConverter.IsLittleEndian)
-            dimBytes.CopyTo(bytes, 0);
-        else
-        {
+        if (!BitConverter.IsLittleEndian)
             Array.Reverse(dimBytes);
-            dimBytes.CopyTo(bytes, 0);
-        }
+        dimBytes.CopyTo(bytes, 0);
 
-        // Write float values as LE
         for (int i = 0; i < dim; i++)
         {
             var fBytes = BitConverter.GetBytes(vector[i]);
@@ -214,7 +256,6 @@ internal sealed class SqliteVectorStore : IVectorStore
         if (blob.Length < 8)
             throw new InvalidOperationException("Invalid embedding blob: too short.");
 
-        // Read dimension
         var dimBytes = new byte[4];
         Array.Copy(blob, 0, dimBytes, 0, 4);
         if (!BitConverter.IsLittleEndian)

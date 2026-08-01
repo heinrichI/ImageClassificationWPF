@@ -1,4 +1,4 @@
-using ImageClassification.ArchiveReader;
+using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
 using Microsoft.Extensions.Logging;
@@ -9,16 +9,23 @@ namespace ImageClassification.Tests.Services;
 public class ComicCoverSearchServiceTests
 {
     private readonly Mock<IArchiveReader> _mockArchiveReader;
-    private readonly Mock<IClipImageEncoder> _mockClipImageEncoder;
     private readonly Mock<IClipTextEncoder> _mockClipTextEncoder;
     private readonly Mock<IVectorStore> _mockVectorStore;
+    private readonly Mock<IModelDownloader> _mockDownloader;
+    private readonly BatchImageEncoder _batchEncoder;
 
     public ComicCoverSearchServiceTests()
     {
         _mockArchiveReader = new Mock<IArchiveReader>();
-        _mockClipImageEncoder = new Mock<IClipImageEncoder>();
         _mockClipTextEncoder = new Mock<IClipTextEncoder>();
         _mockVectorStore = new Mock<IVectorStore>();
+        _mockDownloader = new Mock<IModelDownloader>();
+        // Point to a non-existent path — tests that don't invoke inference won't load the model
+        _mockDownloader.Setup(d => d.GetModelPath(It.IsAny<string>())).Returns("dummy.onnx");
+        _batchEncoder = new BatchImageEncoder(
+            _mockDownloader.Object,
+            new BatchImageEncoderSettings { BatchSize = 32 },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<BatchImageEncoder>.Instance);
     }
 
     [Fact]
@@ -36,7 +43,7 @@ public class ComicCoverSearchServiceTests
             Assert.NotNull(results);
             Assert.Empty(results);
             _mockArchiveReader.Verify(
-                r => r.ExtractFirstImageAsync(It.IsAny<string>()), Times.Never);
+                r => r.ExtractImageToMemoryAsync(It.IsAny<string>(), It.IsAny<int>()), Times.Never);
         }
         finally
         {
@@ -66,8 +73,8 @@ public class ComicCoverSearchServiceTests
         await File.WriteAllBytesAsync(dummyCbz, []);
 
         _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(dummyCbz))
-            .ReturnsAsync((string?)null);
+            .Setup(r => r.ExtractImageToMemoryAsync(dummyCbz, 0))
+            .ReturnsAsync((byte[]?)null);
 
         var service = CreateService();
 
@@ -92,14 +99,20 @@ public class ComicCoverSearchServiceTests
 
         var comicPath = Path.Combine(searchDir, "summer_adventure.cbz");
         await File.WriteAllBytesAsync(comicPath, []);
-        var coverPath = Path.Combine(searchDir, "cover_tmp.jpg");
-        await File.WriteAllTextAsync(coverPath, "fake-image-data");
-
-        _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(comicPath))
-            .ReturnsAsync(coverPath);
 
         var service = CreateService();
+
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.Is<List<(string FilePath, DateTime LastModified, long FileSize)>>(l =>
+                    l.Any(x => x.FilePath == comicPath))))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = path == comicPath ? CreateEmbedding(1f) : null;
+                return result;
+            });
 
         try
         {
@@ -109,7 +122,7 @@ public class ComicCoverSearchServiceTests
             var coverResult = Assert.Single(results);
             Assert.Equal(comicPath, coverResult.ArchivePath);
             Assert.Equal("summer_adventure.cbz", coverResult.ArchiveFileName);
-            Assert.Equal(coverPath, coverResult.CoverImagePath);
+            Assert.Equal(string.Empty, coverResult.CoverImagePath);
             Assert.True(coverResult.SimilarityScore > 0);
         }
         finally
@@ -127,14 +140,19 @@ public class ComicCoverSearchServiceTests
 
         var comicPath = Path.Combine(subDir, "nested.cbr");
         await File.WriteAllBytesAsync(comicPath, []);
-        var coverPath = Path.Combine(subDir, "cover_tmp.jpg");
-        await File.WriteAllTextAsync(coverPath, "fake-image-data");
-
-        _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(comicPath))
-            .ReturnsAsync(coverPath);
 
         var service = CreateService();
+
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = CreateEmbedding(1f);
+                return result;
+            });
 
         try
         {
@@ -158,19 +176,21 @@ public class ComicCoverSearchServiceTests
 
         var matchPath = Path.Combine(searchDir, "match.cbz");
         var skipPath = Path.Combine(searchDir, "skip.cbr");
-        var cover1 = Path.Combine(searchDir, "cover1.jpg");
-        var cover2 = Path.Combine(searchDir, "cover2.jpg");
         await File.WriteAllBytesAsync(matchPath, []);
         await File.WriteAllBytesAsync(skipPath, []);
-        await File.WriteAllTextAsync(cover1, "cover1");
-        await File.WriteAllTextAsync(cover2, "cover2");
-
-        _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(matchPath)).ReturnsAsync(cover1);
-        _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(skipPath)).ReturnsAsync(cover2);
 
         var service = CreateService();
+
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = CreateEmbedding(1f);
+                return result;
+            });
 
         try
         {
@@ -193,15 +213,21 @@ public class ComicCoverSearchServiceTests
 
         var txtFile = Path.Combine(searchDir, "readme.txt");
         var cbzFile = Path.Combine(searchDir, "comic.cbz");
-        var coverPath = Path.Combine(searchDir, "cover.jpg");
         await File.WriteAllTextAsync(txtFile, "hello");
         await File.WriteAllBytesAsync(cbzFile, []);
-        await File.WriteAllTextAsync(coverPath, "cover");
-
-        _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(cbzFile)).ReturnsAsync(coverPath);
 
         var service = CreateService();
+
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = CreateEmbedding(1f);
+                return result;
+            });
 
         try
         {
@@ -224,12 +250,18 @@ public class ComicCoverSearchServiceTests
         Directory.CreateDirectory(searchDir);
 
         var cbzFile = Path.Combine(searchDir, "test.cbz");
-        var coverPath = Path.Combine(searchDir, "cover.jpg");
         await File.WriteAllBytesAsync(cbzFile, []);
-        await File.WriteAllTextAsync(coverPath, "cover");
 
-        _mockArchiveReader
-            .Setup(r => r.ExtractFirstImageAsync(cbzFile)).ReturnsAsync(coverPath);
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = CreateEmbedding(1f);
+                return result;
+            });
 
         var service = CreateService();
         var progressValues = new List<(int Current, int Total)>();
@@ -254,21 +286,9 @@ public class ComicCoverSearchServiceTests
         var mockLogger = new Mock<ILogger<ComicCoverSearchService>>();
 
         // Mock text encoder to return a deterministic vector
-        // Use a uniform vector so cosine similarity is always positive
         _mockClipTextEncoder
             .Setup(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync((string text, CancellationToken _) =>
-            {
-                var vec = new float[512];
-                vec[0] = 1.0f;
-                return vec;
-            });
-
-        // Mock image encoder to return a deterministic vector
-        // Use the same index as text encoder so cosine similarity = 1.0
-        _mockClipImageEncoder
-            .Setup(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync((string path, CancellationToken _) =>
             {
                 var vec = new float[512];
                 vec[0] = 1.0f;
@@ -284,12 +304,30 @@ public class ComicCoverSearchServiceTests
             .Setup(s => s.SaveAsync(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<DateTime>(), It.IsAny<long>(), It.IsAny<float[]>()))
             .Returns(Task.CompletedTask);
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .Returns((string modelName,
+                List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = null;
+                return Task.FromResult(result);
+            });
 
         return new ComicCoverSearchService(
             _mockArchiveReader.Object,
-            _mockClipImageEncoder.Object,
             _mockClipTextEncoder.Object,
             _mockVectorStore.Object,
+            _batchEncoder,
             mockLogger.Object);
+    }
+
+    private static float[] CreateEmbedding(float firstValue)
+    {
+        var vector = new float[512];
+        vector[0] = firstValue;
+        return vector;
     }
 }

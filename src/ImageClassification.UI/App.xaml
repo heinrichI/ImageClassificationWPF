@@ -6,7 +6,6 @@
         <converters:InvertBoolConverter x:Key="InvertBoolConverter"/>
         <converters:BoolToVisConverter x:Key="BoolToVisConverter"/>
         <converters:PathListConverter x:Key="PathListConverter"/>
-        <converters:ImagePathToImageConverter x:Key="ImagePathToImageConverter"/>
         <converters:InvertBoolVisConverter x:Key="InvertBoolVisConverter"/>
         <converters:CountToVisConverter x:Key="CountToVisConverter"/>
         <converters:NonEmptyStringToVisibilityConverter x:Key="NonEmptyStringToVisibilityConverter"/>

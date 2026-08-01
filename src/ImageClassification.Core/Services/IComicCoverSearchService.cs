@@ -21,4 +21,25 @@ public interface IComicCoverSearchService : IDisposable
         string query,
         IProgress<(int Current, int Total)>? progress = null,
         CancellationToken ct = default);
+
+    /// <summary>
+    /// Scans a directory tree for CBZ/CBR archives, extracts ALL image pages,
+    /// computes embeddings for each page, and ranks them by similarity to the given text query.
+    /// </summary>
+    Task<List<ComicCoverResult>> SearchAllPagesAsync(
+        string directoryPath,
+        string query,
+        IProgress<(int Current, int Total)>? progress = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Lazily extracts the cover image from a single archive.
+    /// Call after SearchAsync to populate CoverImagePath for displayed results.
+    /// </summary>
+    Task<string?> ExtractCoverAsync(string archivePath);
+
+    /// <summary>
+    /// Clears the cached embeddings for comic search.
+    /// </summary>
+    Task ClearCacheAsync();
 }

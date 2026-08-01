@@ -48,28 +48,46 @@ internal sealed class CachedImageFeatureExtractor : IImageFeatureExtractor
     public async Task<List<ImageFeatures>> ExtractBatchAsync(
         List<string> imagePaths, IProgress<int>? progress = null)
     {
-        // Phase 1: check cache for every path
-        var cacheHits = new List<ImageFeatures>();
-        var missPaths = new List<string>();
+        if (imagePaths.Count == 0)
+            return new List<ImageFeatures>();
 
+        // Phase 1: batch cache lookup — one DB round-trip
+        var entries = new List<(string FilePath, DateTime LastModified, long FileSize)>(imagePaths.Count);
         foreach (var path in imagePaths)
         {
             try
             {
                 var meta = GetFileMeta(path);
-                var cached = await _store.GetAsync(ModelName, path, meta.LastModified, meta.FileSize)
-                    .ConfigureAwait(false);
-
-                if (cached is not null)
-                {
-                    cacheHits.Add(new ImageFeatures { FilePath = path, Features = cached });
-                }
-                else
-                {
-                    missPaths.Add(path);
-                }
+                entries.Add((path, meta.LastModified, meta.FileSize));
             }
             catch
+            {
+                // If FileInfo fails, treat as miss
+                entries.Add((path, DateTime.MinValue, 0));
+            }
+        }
+
+        Dictionary<string, float[]?> cacheResults;
+        try
+        {
+            cacheResults = await _store.GetBatchAsync(ModelName, entries)
+                .ConfigureAwait(false);
+        }
+        catch
+        {
+            cacheResults = new Dictionary<string, float[]?>();
+        }
+
+        var cacheHits = new List<ImageFeatures>();
+        var missPaths = new List<string>();
+
+        foreach (var path in imagePaths)
+        {
+            if (cacheResults.TryGetValue(path, out var cached) && cached is not null)
+            {
+                cacheHits.Add(new ImageFeatures { FilePath = path, Features = cached });
+            }
+            else
             {
                 missPaths.Add(path);
             }

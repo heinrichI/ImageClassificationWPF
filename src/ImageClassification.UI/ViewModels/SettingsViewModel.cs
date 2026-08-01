@@ -21,6 +21,10 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private string _selectedTheme = "Light";
     [ObservableProperty] private bool _useGpuAcceleration = false;
 
+    // Thumbnail settings
+    [ObservableProperty] private int _thumbnailWidth = 180;
+    [ObservableProperty] private int _maxCachedThumbnails = 400;
+
 
     public string[] Themes => new[] { "Light", "Dark" };
     public ObservableCollection<ModelDownloadInfo> AvailableModels { get; } = new();

@@ -4,10 +4,12 @@
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:ImageClassification.UI.ViewModels"
+             xmlns:controls="clr-namespace:ImageClassification.UI.Views.Controls"
              mc:Ignorable="d"
              d:DataContext="{d:DesignInstance Type=vm:ComicCoverSearchViewModel, IsDesignTimeCreatable=False}">
     <Grid Margin="10">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -62,8 +64,15 @@
             </Grid>
         </GroupBox>
 
-        <!-- Similarity threshold -->
+        <!-- Similarity threshold with tooltip -->
         <GroupBox Header="3. Similarity threshold" Grid.Row="2" Margin="0,0,0,5">
+            <GroupBox.ToolTip>
+                <TextBlock>
+                    Minimum similarity score: results below this threshold are hidden.
+                    <LineBreak />
+                    Values range from 0% (show all) to 100% (exact match only).
+                </TextBlock>
+            </GroupBox.ToolTip>
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto" />
@@ -74,14 +83,14 @@
                            Text="Min:"
                            VerticalAlignment="Center"
                            Margin="0,0,5,0" />
-                <Slider Grid.Column="1"
-                        Minimum="0"
-                        Maximum="1"
-                        TickFrequency="0.05"
-                        IsSnapToTickEnabled="True"
-                        Value="{Binding SimilarityThreshold, Mode=TwoWay}"
-                        VerticalAlignment="Center"
-                        Margin="0,0,5,0" />
+                <controls:NumericUpDownControl Grid.Column="1"
+                                               Minimum="0"
+                                               Maximum="1"
+                                               Step="0.01"
+                                               Format="P0"
+                                               Value="{Binding SimilarityThreshold, Mode=TwoWay}"
+                                               VerticalAlignment="Center"
+                                               Margin="0,0,5,0" />
                 <TextBlock Grid.Column="2"
                            Text="{Binding SimilarityThreshold, StringFormat=P0}"
                            VerticalAlignment="Center"
@@ -90,11 +99,30 @@
             </Grid>
         </GroupBox>
 
+        <!-- Search mode -->
+        <GroupBox Header="4. Search mode" Grid.Row="3" Margin="0,0,0,5">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0"
+                           Text="Mode:"
+                           VerticalAlignment="Center"
+                           Margin="0,0,5,0" />
+                <ComboBox Grid.Column="1"
+                          ItemsSource="{Binding SearchModes}"
+                          SelectedIndex="{Binding SelectedModeIndex, Mode=TwoWay}"
+                          VerticalAlignment="Center"
+                          Margin="0,0,5,0" />
+            </Grid>
+        </GroupBox>
+
         <!-- Progress bar -->
-        <Grid Grid.Row="3" Margin="0,0,0,5">
+        <Grid Grid.Row="4" Margin="0,0,0,5">
             <ProgressBar Minimum="0"
-                         Maximum="100"
-                         Value="{Binding ProgressPercent, Mode=OneWay}"
+                         Maximum="{Binding ProgressTotal, Mode=OneWay}"
+                         Value="{Binding ProgressCurrent, Mode=OneWay}"
                          Height="20"
                          Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisConverter}}"
                          IsIndeterminate="{Binding ProgressTotal, Converter={StaticResource ZeroToBoolConverter}}" />
@@ -109,7 +137,7 @@
                 </TextBlock.Text>
             </TextBlock>
         </Grid>
-        <TextBlock Grid.Row="4"
+        <TextBlock Grid.Row="5"
                    Text="{Binding StatusMessage}"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Center"
@@ -117,7 +145,7 @@
                    Margin="0,0,0,5" />
 
         <!-- Results list -->
-        <ListView Grid.Row="5"
+        <ListView Grid.Row="6"
                   ItemsSource="{Binding Results}"
                   VirtualizingPanel.ScrollUnit="Pixel"
                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
@@ -134,7 +162,15 @@
                             Margin="4"
                             Padding="4"
                             Width="180"
-                            Cursor="Hand">
+                            Cursor="Hand"
+                            Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}">
+                        <Border.ContextMenu>
+                            <ContextMenu>
+                                <MenuItem Header="Copy path"
+                                          Command="{Binding PlacementTarget.Tag.CopyArchivePathCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                          CommandParameter="{Binding ArchivePath}" />
+                            </ContextMenu>
+                        </Border.ContextMenu>
                         <Border.InputBindings>
                             <MouseBinding Gesture="LeftClick"
                                           Command="{Binding DataContext.OpenComicCommand, RelativeSource={RelativeSource AncestorType=ListView}}"
@@ -144,6 +180,7 @@
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="*" />
+                                <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
@@ -156,7 +193,7 @@
                                        Margin="0,0,0,4" />
                             <!-- Cover image -->
                             <Image Grid.Row="1"
-                                   Source="{Binding CoverImagePath}"
+                                   Source="{Binding Thumbnail}"
                                    MaxHeight="240"
                                    Stretch="Uniform"
                                    VerticalAlignment="Center"
@@ -166,11 +203,18 @@
                                        Text="{Binding ArchiveFileName}"
                                        TextWrapping="WrapWithOverflow"
                                        TextAlignment="Center"
-                                        FontSize="11"
-                                        TextTrimming="CharacterEllipsis"
-                                        Margin="0,4,0,0" />
-                            <!-- Click hint -->
+                                       FontSize="11"
+                                       TextTrimming="CharacterEllipsis"
+                                       Margin="0,4,0,0" />
+                            <!-- Page label -->
                             <TextBlock Grid.Row="3"
+                                       Text="{Binding PageLabel}"
+                                       FontSize="10"
+                                       Foreground="Gray"
+                                       TextAlignment="Center"
+                                       Margin="0,2,0,0" />
+                            <!-- Click hint -->
+                            <TextBlock Grid.Row="4"
                                        Text="(click to open)"
                                        FontSize="10"
                                        Foreground="Gray"
@@ -182,7 +226,7 @@
         </ListView>
 
         <!-- Status bar -->
-        <StatusBar Grid.Row="6">
+        <StatusBar Grid.Row="7">
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusMessage}" />
             </StatusBarItem>

@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.Input;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
 using ImageClassification.UI.Models;
+using ImageClassification.UI.Services;
 using Microsoft.Win32;
 
 namespace ImageClassification.UI.ViewModels;
@@ -16,16 +17,19 @@ public partial class AnalyzeViewModel : ObservableObject
     private readonly IImageFeatureExtractor _featureExtractor;
     private readonly IClusterService _clusterService;
     private readonly ITagService _tagService;
+    private readonly ThumbnailProvider _thumbnailProvider;
     private CancellationTokenSource? _cts;
 
     public AnalyzeViewModel(
         IImageFeatureExtractor featureExtractor,
         IClusterService clusterService,
-        ITagService tagService)
+        ITagService tagService,
+        ThumbnailProvider thumbnailProvider)
     {
         _featureExtractor = featureExtractor;
         _clusterService = clusterService;
         _tagService = tagService;
+        _thumbnailProvider = thumbnailProvider;
     }
 
     // Common
@@ -199,7 +203,7 @@ public partial class AnalyzeViewModel : ObservableObject
                 {
                     editableItem.Tags.Add(new EditableTag { Tag = tag, Score = score, IsSelected = score >= TagConfidenceThreshold });
                 }
-                editableItem.LoadThumbnail();
+                editableItem.LoadThumbnail(_thumbnailProvider);
                 EditableTagResults.Add(editableItem);
             }
 

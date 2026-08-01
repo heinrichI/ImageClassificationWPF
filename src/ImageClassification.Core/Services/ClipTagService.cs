@@ -31,48 +31,53 @@ internal sealed class ClipTagService : ITagService
         int topK = 5,
         IProgress<int>? progress = null)
     {
-        var results = new ConcurrentBag<ImageTagResult>();
+        if (imagePaths.Count == 0 || candidateTags.Length == 0)
+            return new List<ImageTagResult>();
 
-        await Task.Run(() =>
+        // Pre-compute text embeddings for ALL candidate tags (Step 4 optimisation)
+        var textEmbeddings = new Dictionary<string, float[]>(candidateTags.Length);
+        foreach (var tag in candidateTags)
         {
-            int completed = 0;
+            var trimmed = tag.Trim();
+            if (string.IsNullOrEmpty(trimmed)) continue;
+            textEmbeddings[trimmed] = await _textEncoder.EncodeTextAsync(trimmed)
+                .ConfigureAwait(false);
+        }
 
-            foreach (var imagePath in imagePaths)
+        var results = new ConcurrentBag<ImageTagResult>();
+        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
+        int completed = 0;
+
+        await Parallel.ForEachAsync(imagePaths, parallelOptions, async (imagePath, ct) =>
+        {
+            try
             {
-                try
+                var imageEmbedding = await _clipEncoder.EncodeImageAsync(imagePath, ct)
+                    .ConfigureAwait(false);
+
+                var tagScores = new List<(string Tag, float Score)>();
+                foreach (var (tag, textEmb) in textEmbeddings)
                 {
-                    // Encode image via shared cached encoder
-                    var imageEmbedding = _clipEncoder.EncodeImageAsync(imagePath)
-                        .GetAwaiter().GetResult();
-
-                    // Compute similarity with each tag using real CLIP text embeddings
-                    var tagScores = new List<(string Tag, float Score)>();
-                    foreach (var tag in candidateTags)
-                    {
-                        var textEmbedding = _textEncoder.EncodeTextAsync(tag)
-                            .GetAwaiter().GetResult();
-                        float similarity = CosineSimilarity(imageEmbedding, textEmbedding);
-                        tagScores.Add((tag.Trim(), similarity));
-                    }
-
-                    // Sort by score, take top-K
-                    var topTags = tagScores
-                        .OrderByDescending(t => t.Score)
-                        .Take(topK)
-                        .ToList();
-
-                    results.Add(new ImageTagResult
-                    {
-                        FilePath = imagePath,
-                        Tags = topTags
-                    });
+                    float similarity = CosineSimilarity(imageEmbedding, textEmb);
+                    tagScores.Add((tag, similarity));
                 }
-                catch { /* Skip unprocessable images */ }
 
-                var count = Interlocked.Increment(ref completed);
-                progress?.Report(count);
+                var topTags = tagScores
+                    .OrderByDescending(t => t.Score)
+                    .Take(topK)
+                    .ToList();
+
+                results.Add(new ImageTagResult
+                {
+                    FilePath = imagePath,
+                    Tags = topTags
+                });
             }
-        });
+            catch { /* Skip unprocessable images */ }
+
+            var count = Interlocked.Increment(ref completed);
+            progress?.Report(count);
+        }).ConfigureAwait(false);
 
         return results.OrderBy(r => imagePaths.IndexOf(r.FilePath)).ToList();
     }

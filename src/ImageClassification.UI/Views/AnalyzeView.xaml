@@ -123,8 +123,7 @@
                                 <StackPanel Orientation="Horizontal">
                                     <!-- Thumbnail -->
                                     <Border Width="80" Height="80" CornerRadius="4" ClipToBounds="True" Margin="0,0,12,0">
-                                        <Image Source="{Binding FilePath, Converter={StaticResource ImagePathToImageConverter}}"
-                                               Stretch="UniformToFill"/>
+                                        <Image Source="{Binding Thumbnail}" Stretch="UniformToFill" />
                                     </Border>
                                     <!-- Tags -->
                                     <StackPanel VerticalAlignment="Center">
