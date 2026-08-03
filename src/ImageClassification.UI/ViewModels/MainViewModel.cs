@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -30,6 +31,8 @@ public partial class MainViewModel : ObservableObject
         Analyze = analyze;
         Settings = settings;
         ComicCoverSearch = comicCoverSearch;
+
+        RebuildMenu();
     }
 
     [ObservableProperty]
@@ -37,6 +40,40 @@ public partial class MainViewModel : ObservableObject
 
     [ObservableProperty]
     private int _selectedTabIndex;
+
+    /// <summary>
+    /// Menu items contributed by the currently active tab ViewModel.
+    /// </summary>
+    public ObservableCollection<TabMenuItem> ActiveMenuItems { get; } = new();
+
+    partial void OnSelectedTabIndexChanged(int value)
+    {
+        RebuildMenu();
+    }
+
+    private void RebuildMenu()
+    {
+        ActiveMenuItems.Clear();
+
+        object? activeTab = SelectedTabIndex switch
+        {
+            0 => Train,
+            1 => Evaluate,
+            2 => Classify,
+            3 => Analyze,
+            4 => Settings,
+            5 => ComicCoverSearch,
+            _ => null
+        };
+
+        if (activeTab is ITabMenuProvider provider)
+        {
+            foreach (var item in provider.MenuItems)
+            {
+                ActiveMenuItems.Add(item);
+            }
+        }
+    }
 
     [RelayCommand]
     private void About()

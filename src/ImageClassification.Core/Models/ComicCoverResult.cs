@@ -11,9 +11,6 @@ public class ComicCoverResult
     /// <summary>File name of the archive (e.g. "spiderman-001.cbz").</summary>
     public string ArchiveFileName { get; set; } = string.Empty;
 
-    /// <summary>Full path to the extracted cover image temp file.</summary>
-    public string CoverImagePath { get; set; } = string.Empty;
-
     /// <summary>Cosine similarity score between the cover embedding and the text query.</summary>
     public float SimilarityScore { get; set; }
 

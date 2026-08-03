@@ -19,7 +19,7 @@ namespace ImageClassification.UI.Services
         private readonly IComicCoverSearchService _coverService;
         private readonly int _maxCacheItems = 500;
         private readonly ConcurrentDictionary<string, BitmapSource> _cache = new();
-        private readonly ConcurrentQueue<(string Path, int Width, Action<BitmapSource?>? Callback)> _queue = new();
+        private readonly ConcurrentQueue<(string Key, byte[]? Data, int Width, Action<BitmapSource?>? Callback)> _queue = new();
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _worker;
 
@@ -35,7 +35,7 @@ namespace ImageClassification.UI.Services
         {
             if (string.IsNullOrEmpty(path)) return;
             if (_cache.ContainsKey(path)) return;
-            _queue.Enqueue((path, width > 0 ? width : _settings.ThumbnailWidth, callback));
+            _queue.Enqueue((path, null, width > 0 ? width : _settings.ThumbnailWidth, callback));
         }
 
         public BitmapSource? GetBitmap(string path, int width, Action<BitmapSource?>? onLoaded = null)
@@ -61,7 +61,7 @@ namespace ImageClassification.UI.Services
             return ph;
         }
 
-        public void EnsureCoverAndEnqueue(string archivePath, Action<string?>? onCoverExtracted = null, Action<BitmapSource?>? onLoaded = null)
+        public void EnsureCoverAndEnqueue(string archivePath, Action<BitmapSource?>? onLoaded = null)
         {
             if (string.IsNullOrEmpty(archivePath)) return;
 
@@ -69,24 +69,20 @@ namespace ImageClassification.UI.Services
             {
                 try
                 {
-                    var coverPath = await _coverService.ExtractCoverAsync(archivePath).ConfigureAwait(false);
-                    if (string.IsNullOrEmpty(coverPath))
+                    if (_cache.ContainsKey(archivePath)) return;
+
+                    var bytes = await _coverService.ExtractCoverAsync(archivePath).ConfigureAwait(false);
+                    if (bytes is null || bytes.Length == 0)
                     {
-                        if (onCoverExtracted is not null)
+                        if (onLoaded is not null)
                         {
-                            await Application.Current.Dispatcher.InvokeAsync(() => onCoverExtracted(null));
+                            await Application.Current.Dispatcher.InvokeAsync(() => onLoaded(null));
                         }
                         return;
                     }
 
-                    // Notify UI about extracted cover path so caller may update item.CoverImagePath
-                    if (onCoverExtracted is not null)
-                    {
-                        await Application.Current.Dispatcher.InvokeAsync(() => onCoverExtracted(coverPath));
-                    }
-
-                    // Enqueue loading of the extracted cover
-                    Enqueue(coverPath, _settings.ThumbnailWidth, onLoaded);
+                    // Enqueue decoding of the in-memory cover bytes
+                    _queue.Enqueue((archivePath, bytes, _settings.ThumbnailWidth, onLoaded));
                 }
                 catch (OperationCanceledException) { /* cancelled */ }
                 catch (Exception ex)
@@ -157,28 +153,48 @@ namespace ImageClassification.UI.Services
                     {
                         try
                         {
-                            var path = work.Path;
+                            var key = work.Key;
+                            var data = work.Data;
                             var width = work.Width;
                             var callback = work.Callback;
 
-                            if (!File.Exists(path))
+                            BitmapSource? image;
+                            if (data is not null)
                             {
-                                // notify null
-                                if (callback is not null)
-                                    await Application.Current.Dispatcher.BeginInvoke(new Action(() => callback(null)));
-                                continue;
+                                // Cover extracted in memory — decode from bytes (OnLoad fully decodes, stream can close)
+                                using var stream = new MemoryStream(data);
+                                var bmp = new BitmapImage();
+                                bmp.BeginInit();
+                                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                                bmp.StreamSource = stream;
+                                bmp.DecodePixelWidth = width;
+                                bmp.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                                bmp.EndInit();
+                                bmp.Freeze();
+                                image = bmp;
+                            }
+                            else
+                            {
+                                if (!File.Exists(key))
+                                {
+                                    // notify null
+                                    if (callback is not null)
+                                        await Application.Current.Dispatcher.BeginInvoke(new Action(() => callback(null)));
+                                    continue;
+                                }
+
+                                var bmp = new BitmapImage();
+                                bmp.BeginInit();
+                                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                                bmp.UriSource = new Uri(key);
+                                bmp.DecodePixelWidth = width;
+                                bmp.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+                                bmp.EndInit();
+                                bmp.Freeze();
+                                image = bmp;
                             }
 
-                            var image = new BitmapImage();
-                            image.BeginInit();
-                            image.CacheOption = BitmapCacheOption.OnLoad;
-                            image.UriSource = new Uri(path);
-                            image.DecodePixelWidth = width;
-                            image.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
-                            image.EndInit();
-                            image.Freeze();
-
-                            _cache[path] = image;
+                            _cache[key] = image;
 
                             if (callback is not null)
                                 await Application.Current.Dispatcher.BeginInvoke(new Action(() => callback(image)));
@@ -189,8 +205,8 @@ namespace ImageClassification.UI.Services
                                 var oldest = _cache.Keys.GetEnumerator();
                                 if (oldest.MoveNext())
                                 {
-                                    var key = oldest.Current;
-                                    _cache.TryRemove(key, out _);
+                                var oldestKey = oldest.Current;
+                                _cache.TryRemove(oldestKey, out _);
                                 }
                             }
                         }

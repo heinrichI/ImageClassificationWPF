@@ -57,19 +57,12 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         var witchbladeResult = results.FirstOrDefault(r =>
             r.ArchiveFileName == "Witchblade - Red Sonja 05 24.cbr");
         Assert.NotNull(witchbladeResult);
-        Assert.NotNull(witchbladeResult.CoverImagePath);
-        Assert.True(File.Exists(witchbladeResult.CoverImagePath),
-            $"Cover temp file does not exist: {witchbladeResult.CoverImagePath}");
 
         // Verify the score is a valid cosine similarity (0..1 range)
         Assert.True(witchbladeResult.SimilarityScore > 0,
             $"Expected positive similarity score but got {witchbladeResult.SimilarityScore}");
         Assert.True(witchbladeResult.SimilarityScore <= 1.0f,
             $"Expected similarity score <= 1.0 but got {witchbladeResult.SimilarityScore}");
-
-        // Verify the cover image has actual content
-        var fileInfo = new FileInfo(witchbladeResult.CoverImagePath);
-        Assert.True(fileInfo.Length > 0, "Cover image is empty");
     }
 
     [Fact(Skip = "Integration test — requires real CLIP ONNX model and .cbr file")]
@@ -151,15 +144,6 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         var bottomScore = results[^1].SimilarityScore;
         Assert.True(topScore - bottomScore >= 0.05f,
             $"Score spread too narrow: top={topScore:F4}, bottom={bottomScore:F4}");
-
-        // Verify cover images exist and have content
-        foreach (var result in results)
-        {
-            Assert.True(File.Exists(result.CoverImagePath),
-                $"Cover does not exist: {result.CoverImagePath}");
-            Assert.True(new FileInfo(result.CoverImagePath).Length > 0,
-                $"Cover is empty: {result.CoverImagePath}");
-        }
     }
 
     public void Dispose()

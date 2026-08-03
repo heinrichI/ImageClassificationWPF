@@ -16,27 +16,32 @@ namespace ImageClassification.UI.ViewModels;
 /// Pure ViewModel for the Comic Cover Search tab.
 /// No code-behind logic — all commands and bindings are here.
 /// </summary>
-public partial class ComicCoverSearchViewModel : ObservableObject
+public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvider
 {
     private readonly IComicCoverSearchService _searchService;
     private readonly ILogger<ComicCoverSearchViewModel> _logger;
     private readonly ThumbnailProvider _thumbnailProvider;
+    private readonly ImageCopyService _copyService;
     private CancellationTokenSource? _cts;
+    private CancellationTokenSource? _copyCts;
     private SearchMode _lastSearchMode = SearchMode.CoversOnly;
     private DateTime _lastProgressUiUpdateUtc = DateTime.MinValue;
 
     public ComicCoverSearchViewModel(IComicCoverSearchService searchService, ILogger<ComicCoverSearchViewModel> logger,
-        ThumbnailProvider thumbnailProvider)
+        ThumbnailProvider thumbnailProvider, ImageCopyService copyService)
     {
         _searchService = searchService ?? throw new ArgumentNullException(nameof(searchService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _thumbnailProvider = thumbnailProvider;
+        _copyService = copyService ?? throw new ArgumentNullException(nameof(copyService));
 
         SearchModes = new ObservableCollection<string>
         {
             "Covers only",
             "All pages"
         };
+
+        Results.CollectionChanged += (_, _) => CopyResultsImagesCommand.NotifyCanExecuteChanged();
     }
 
     // ────────────────────────────── Observable properties ──────────────────────────────
@@ -90,6 +95,11 @@ public partial class ComicCoverSearchViewModel : ObservableObject
     public ObservableCollection<ComicCoverItem> Results { get; } = new();
 
     public ObservableCollection<string> SearchModes { get; }
+
+    /// <inheritdoc />
+    public IReadOnlyList<TabMenuItem> MenuItems =>
+        new[] { new TabMenuItem("Copy results images...", CopyResultsImagesCommand) };
+
 
     /// <summary>
     /// Returns the current SearchMode derived from SelectedModeIndex.
@@ -216,30 +226,13 @@ public partial class ComicCoverSearchViewModel : ObservableObject
                 {
                     ArchivePath = result.ArchivePath,
                     ArchiveFileName = result.ArchiveFileName,
-                    CoverImagePath = result.CoverImagePath,
                     SimilarityScore = result.SimilarityScore,
                     PageIndex = result.PageIndex,
                     PageCount = result.PageCount
                 };
 
-                // Trigger thumbnail load if we have a cover image path; otherwise request extraction
-                if (!string.IsNullOrEmpty(result.CoverImagePath))
-                {
-                    var bitmap = _thumbnailProvider.GetBitmap(result.CoverImagePath, 180, b => item.Thumbnail = b);
-                    if (bitmap != null) item.Thumbnail = bitmap;
-                }
-                else
-                {
-                    // Start extraction; update item's CoverImagePath and set thumbnail when loaded
-                    _thumbnailProvider.EnsureCoverAndEnqueue(
-                        result.ArchivePath,
-                        coverPath =>
-                        {
-                            if (!string.IsNullOrEmpty(coverPath))
-                                item.CoverImagePath = coverPath;
-                        },
-                        b => item.Thumbnail = b);
-                }
+                // Extract cover in memory and set the thumbnail when loaded
+                _thumbnailProvider.EnsureCoverAndEnqueue(result.ArchivePath, b => item.Thumbnail = b);
  
                 // Add to results (thumbnail callback will update UI when available)
                 Results.Add(item);
@@ -279,6 +272,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject
         _logger.LogInformation("IsBusy changed to {IsBusy}. Search button should be {State}",
             value, value ? "disabled" : "enabled");
         SearchCommand.NotifyCanExecuteChanged();
+        CopyResultsImagesCommand.NotifyCanExecuteChanged();
     }
 
     [RelayCommand]
@@ -304,9 +298,111 @@ public partial class ComicCoverSearchViewModel : ObservableObject
     [RelayCommand]
     private void Cancel()
     {
-        _cts?.Cancel();
-        StatusMessage = "Cancelling...";
+        if (_copyCts is not null)
+        {
+            _copyCts.Cancel();
+            StatusMessage = "Cancelling copy...";
+        }
+        else
+        {
+            _cts?.Cancel();
+            StatusMessage = "Cancelling...";
+        }
     }
+
+    [RelayCommand(CanExecute = nameof(CanCopyResults))]
+    private async Task CopyResultsImagesAsync()
+    {
+        if (Results.Count == 0)
+        {
+            StatusMessage = "No results to copy.";
+            return;
+        }
+
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Select destination folder for copied images"
+        };
+        if (dialog.ShowDialog() != true)
+            return;
+
+        await CopyResultsImagesCoreAsync(dialog.FolderName);
+    }
+
+    /// <summary>
+    /// Copies all result images (extracted in memory, no temp files) into <paramref name="destinationDirectory"/>.
+    /// </summary>
+    public async Task CopyResultsImagesCoreAsync(string destinationDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(destinationDirectory))
+        {
+            StatusMessage = "No destination folder selected.";
+            return;
+        }
+
+        var items = Results.ToList();
+        if (items.Count == 0)
+        {
+            StatusMessage = "No results to copy.";
+            return;
+        }
+
+        IsBusy = true;
+        StatusMessage = "Copying images...";
+        ProgressCurrent = 0;
+        ProgressTotal = items.Count;
+
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        var progress = new Progress<int>(p =>
+        {
+            void ApplyUpdate()
+            {
+                ProgressCurrent = p;
+                StatusMessage = $"Copying images: {p}/{items.Count}";
+            }
+
+            if (dispatcher != null && !dispatcher.CheckAccess())
+                dispatcher.BeginInvoke(ApplyUpdate);
+            else
+                ApplyUpdate();
+        });
+
+        try
+        {
+            _copyCts?.Cancel();
+            _copyCts = new CancellationTokenSource();
+            var ct = _copyCts.Token;
+
+            CopySummary summary = await Task.Run(() =>
+                _copyService.CopyImagesAsync(items, destinationDirectory, progress, ct), ct);
+
+            var parts = new List<string> { $"Copied {summary.Copied} of {items.Count} images to {destinationDirectory}" };
+            if (summary.Skipped > 0)
+                parts.Add($"skipped {summary.Skipped}");
+            StatusMessage = string.Join(", ", parts);
+            if (summary.Errors.Count > 0)
+            {
+                _logger.LogWarning("Copy finished with {ErrorCount} errors: {Errors}",
+                    summary.Errors.Count, string.Join("; ", summary.Errors.Take(10)));
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            StatusMessage = "Copy cancelled.";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Copy failed: {Message}", ex.Message);
+            StatusMessage = $"Copy failed: {ex.Message}";
+        }
+        finally
+        {
+            _copyCts = null;
+            IsBusy = false;
+        }
+    }
+
+    private bool CanCopyResults() => !IsBusy && Results.Count > 0;
 
     [RelayCommand]
     private void CopyArchivePath(string? archivePath)
@@ -344,13 +440,6 @@ public class ComicCoverItem : ObservableObject
     {
         get => _archiveFileName;
         set => SetProperty(ref _archiveFileName, value);
-    }
-
-    private string _coverImagePath = string.Empty;
-    public string CoverImagePath
-    {
-        get => _coverImagePath;
-        set => SetProperty(ref _coverImagePath, value);
     }
 
     private BitmapSource? _thumbnail;

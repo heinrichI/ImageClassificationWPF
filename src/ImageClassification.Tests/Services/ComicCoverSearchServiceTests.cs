@@ -122,7 +122,6 @@ public class ComicCoverSearchServiceTests
             var coverResult = Assert.Single(results);
             Assert.Equal(comicPath, coverResult.ArchivePath);
             Assert.Equal("summer_adventure.cbz", coverResult.ArchiveFileName);
-            Assert.Equal(string.Empty, coverResult.CoverImagePath);
             Assert.True(coverResult.SimilarityScore > 0);
         }
         finally

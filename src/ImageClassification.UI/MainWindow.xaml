@@ -9,7 +9,18 @@
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel, IsDesignTimeCreatable=False}"
         Title="Image Classification" Height="720" Width="1100"
         WindowStartupLocation="CenterScreen">
-    <Grid>
+    <DockPanel>
+        <Menu DockPanel.Dock="Top"
+              ItemsSource="{Binding ActiveMenuItems}">
+            <Menu.ItemTemplate>
+                <DataTemplate>
+                    <MenuItem Header="{Binding Header}"
+                              Command="{Binding Command}"
+                              CommandParameter="{Binding CommandParameter}" />
+                </DataTemplate>
+            </Menu.ItemTemplate>
+        </Menu>
+        <Grid>
         <TabControl SelectedIndex="{Binding SelectedTabIndex}">
             <TabItem Header="  Training  ">
                 <views:TrainView DataContext="{Binding Train}" />
@@ -30,5 +41,6 @@
                 <views:ComicCoverSearchView DataContext="{Binding ComicCoverSearch}" />
             </TabItem>
         </TabControl>
-    </Grid>
+        </Grid>
+    </DockPanel>
 </Window>

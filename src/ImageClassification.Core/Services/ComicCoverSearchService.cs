@@ -130,7 +130,6 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
             {
                 ArchivePath = archivePath,
                 ArchiveFileName = Path.GetFileName(archivePath),
-                CoverImagePath = string.Empty,
                 SimilarityScore = CosineSimilarity(embedding, queryEmbedding),
                 PageIndex = 0,
                 PageCount = 1
@@ -283,7 +282,6 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
             {
                 ArchivePath = archivePath,
                 ArchiveFileName = Path.GetFileName(archivePath),
-                CoverImagePath = string.Empty,
                 SimilarityScore = CosineSimilarity(embedding, queryEmbedding),
                 PageIndex = pageIdx,
                 PageCount = archivePageCounts[archiveIdx]
@@ -301,9 +299,9 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     }
 
     /// <inheritdoc />
-    public async Task<string?> ExtractCoverAsync(string archivePath)
+    public async Task<byte[]?> ExtractCoverAsync(string archivePath)
     {
-        return await _archiveReader.ExtractImageByIndexAsync(archivePath, 0)
+        return await _archiveReader.ExtractImageToMemoryAsync(archivePath, 0)
             .ConfigureAwait(false);
     }
 
@@ -535,10 +533,21 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
 
     internal static List<string> ScanArchivesRecursive(string directoryPath)
     {
+        var options = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            IgnoreInaccessible = true,
+            MatchType = MatchType.Simple,
+            AttributesToSkip = 0
+        };
+
         var files = new List<string>();
         foreach (var pattern in ArchivePatterns)
         {
-            files.AddRange(Directory.GetFiles(directoryPath, pattern, SearchOption.AllDirectories));
+            foreach (var file in Directory.EnumerateFiles(directoryPath, pattern, options))
+            {
+                files.Add(file);
+            }
         }
         return files;
     }

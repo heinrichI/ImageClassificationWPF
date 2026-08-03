@@ -33,10 +33,10 @@ public interface IComicCoverSearchService : IDisposable
         CancellationToken ct = default);
 
     /// <summary>
-    /// Lazily extracts the cover image from a single archive.
-    /// Call after SearchAsync to populate CoverImagePath for displayed results.
+    /// Lazily extracts the cover image from a single archive into memory.
+    /// Call after SearchAsync to load a thumbnail for a displayed result.
     /// </summary>
-    Task<string?> ExtractCoverAsync(string archivePath);
+    Task<byte[]?> ExtractCoverAsync(string archivePath);
 
     /// <summary>
     /// Clears the cached embeddings for comic search.

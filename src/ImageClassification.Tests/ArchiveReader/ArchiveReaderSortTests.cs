@@ -19,11 +19,10 @@ public sealed class ArchiveReaderSortTests
                 ("Archie (2015-) Vol. 02-000.jpg", new byte[] { 0x00 })
             });
 
-            var coverPath = await reader.ExtractFirstImageAsync(archivePath);
+            var coverBytes = await reader.ExtractFirstImageAsync(archivePath);
 
-            Assert.False(string.IsNullOrWhiteSpace(coverPath));
-            Assert.True(File.Exists(coverPath));
-            Assert.Equal(new byte[] { 0x00 }, await File.ReadAllBytesAsync(coverPath));
+            Assert.NotNull(coverBytes);
+            Assert.Equal(new byte[] { 0x00 }, coverBytes);
         }
         finally
         {
@@ -45,11 +44,10 @@ public sealed class ArchiveReaderSortTests
                 ("CCI08272016.jpg", new byte[] { 0x00 })
             });
 
-            var coverPath = await reader.ExtractFirstImageAsync(archivePath);
+            var coverBytes = await reader.ExtractFirstImageAsync(archivePath);
 
-            Assert.False(string.IsNullOrWhiteSpace(coverPath));
-            Assert.True(File.Exists(coverPath));
-            Assert.Equal(new byte[] { 0x00 }, await File.ReadAllBytesAsync(coverPath));
+            Assert.NotNull(coverBytes);
+            Assert.Equal(new byte[] { 0x00 }, coverBytes);
         }
         finally
         {
@@ -74,11 +72,10 @@ public sealed class ArchiveReaderSortTests
                 ("Archie's Pal Jughead Annual 005-001_Heritage.jpg", new byte[] { 0x01 })
             });
 
-            var coverPath = await reader.ExtractFirstImageAsync(archivePath);
+            var coverBytes = await reader.ExtractFirstImageAsync(archivePath);
 
-            Assert.False(string.IsNullOrWhiteSpace(coverPath));
-            Assert.True(File.Exists(coverPath));
-            Assert.Equal(new byte[] { 0x01 }, await File.ReadAllBytesAsync(coverPath!));
+            Assert.NotNull(coverBytes);
+            Assert.Equal(new byte[] { 0x01 }, coverBytes);
         }
         finally
         {
@@ -104,11 +101,10 @@ public sealed class ArchiveReaderSortTests
                 ("img234.jpg", new byte[] { 0x05 })
             });
 
-            var coverPath = await reader.ExtractFirstImageAsync(archivePath);
+            var coverBytes = await reader.ExtractFirstImageAsync(archivePath);
 
-            Assert.False(string.IsNullOrWhiteSpace(coverPath));
-            Assert.True(File.Exists(coverPath));
-            Assert.Equal(new byte[] { 0x01 }, await File.ReadAllBytesAsync(coverPath!));
+            Assert.NotNull(coverBytes);
+            Assert.Equal(new byte[] { 0x01 }, coverBytes);
         }
         finally
         {
@@ -130,14 +126,14 @@ public sealed class ArchiveReaderSortTests
                 ("Issue Vol. 02-000-a.jpg", new byte[] { 0x0A })
             });
 
-            var firstPath = await reader.ExtractImageByIndexAsync(archivePath, 0);
-            var secondPath = await reader.ExtractImageByIndexAsync(archivePath, 1);
+            var firstBytes = await reader.ExtractImageByIndexAsync(archivePath, 0);
+            var secondBytes = await reader.ExtractImageByIndexAsync(archivePath, 1);
 
-            Assert.False(string.IsNullOrWhiteSpace(firstPath));
-            Assert.False(string.IsNullOrWhiteSpace(secondPath));
+            Assert.NotNull(firstBytes);
+            Assert.NotNull(secondBytes);
 
-            Assert.Equal(new byte[] { 0x0A }, await File.ReadAllBytesAsync(firstPath!));
-            Assert.Equal(new byte[] { 0x0B }, await File.ReadAllBytesAsync(secondPath!));
+            Assert.Equal(new byte[] { 0x0A }, firstBytes);
+            Assert.Equal(new byte[] { 0x0B }, secondBytes);
         }
         finally
         {

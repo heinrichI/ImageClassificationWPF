@@ -35,6 +35,9 @@ public static class AppServiceFactory
                 // Thumbnail infrastructure (background loader + LRU cache)
                 services.AddSingleton<Services.ThumbnailCache>();
                 services.AddSingleton<Services.ThumbnailProvider>();
+
+                // Copy comic search result images (in-memory extraction, no temp files)
+                services.AddSingleton<Services.ImageCopyService>();
  
                 // Windows
                 services.AddTransient<MainWindow>();

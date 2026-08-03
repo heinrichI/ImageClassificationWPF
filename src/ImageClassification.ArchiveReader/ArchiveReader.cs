@@ -23,54 +23,15 @@ internal sealed class ArchiveReader : IArchiveReader
         int FallbackIndex);
 
     /// <inheritdoc />
-    public Task<string?> ExtractFirstImageAsync(string archivePath)
+    public Task<byte[]?> ExtractFirstImageAsync(string archivePath)
     {
-        if (string.IsNullOrWhiteSpace(archivePath))
-            throw new ArgumentException("Archive path must not be null or empty.", nameof(archivePath));
-
-        if (!File.Exists(archivePath))
-            return Task.FromResult<string?>(null);
-
-        try
-        {
-            var entries = GetSortedImageEntries(archivePath);
-            if (entries.Count == 0)
-                return Task.FromResult<string?>(null);
-
-            var (entryName, _) = entries[0];
-            return Task.FromResult(ExtractEntry(archivePath, entryName));
-        }
-        catch (Exception)
-        {
-            return Task.FromResult<string?>(null);
-        }
+        return ExtractImageToMemoryAsync(archivePath, 0);
     }
 
     /// <inheritdoc />
-    public Task<string?> ExtractImageByIndexAsync(string archivePath, int index)
+    public Task<byte[]?> ExtractImageByIndexAsync(string archivePath, int index)
     {
-        if (string.IsNullOrWhiteSpace(archivePath))
-            throw new ArgumentException("Archive path must not be null or empty.", nameof(archivePath));
-
-        if (!File.Exists(archivePath))
-            return Task.FromResult<string?>(null);
-
-        if (index < 0)
-            return Task.FromResult<string?>(null);
-
-        try
-        {
-            var entries = GetSortedImageEntries(archivePath);
-            if (index >= entries.Count)
-                return Task.FromResult<string?>(null);
-
-            var (entryName, _) = entries[index];
-            return Task.FromResult(ExtractEntry(archivePath, entryName));
-        }
-        catch (Exception)
-        {
-            return Task.FromResult<string?>(null);
-        }
+        return ExtractImageToMemoryAsync(archivePath, index);
     }
 
     /// <inheritdoc />
@@ -114,33 +75,6 @@ internal sealed class ArchiveReader : IArchiveReader
         catch
         {
             return Task.FromResult(0);
-        }
-    }
-
-    /// <inheritdoc />
-    public Task<List<string>> ExtractAllImagesAsync(string archivePath)
-    {
-        if (string.IsNullOrWhiteSpace(archivePath))
-            throw new ArgumentException("Archive path must not be null or empty.", nameof(archivePath));
-
-        var result = new List<string>();
-        if (!File.Exists(archivePath))
-            return Task.FromResult(result);
-
-        try
-        {
-            var entries = GetSortedImageEntries(archivePath);
-            foreach (var (entryName, _) in entries)
-            {
-                var tempPath = ExtractEntry(archivePath, entryName);
-                if (tempPath is not null)
-                    result.Add(tempPath);
-            }
-            return Task.FromResult(result);
-        }
-        catch (Exception)
-        {
-            return Task.FromResult(result);
         }
     }
 
@@ -216,16 +150,6 @@ internal sealed class ArchiveReader : IArchiveReader
     }
 
     /// <summary>
-    /// Extracts a single entry from the archive to a temporary file.
-    /// </summary>
-    private string? ExtractEntry(string archivePath, string entryName)
-    {
-        if (archivePath.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase))
-            return ExtractZipEntry(archivePath, entryName);
-        return ExtractSevenZipEntry(archivePath, entryName);
-    }
-
-    /// <summary>
     /// Extracts a single entry from the archive to an in-memory byte array.
     /// </summary>
     private async Task<byte[]?> ExtractEntryToMemoryAsync(string archivePath, string entryName)
@@ -262,40 +186,8 @@ internal sealed class ArchiveReader : IArchiveReader
         return memory.ToArray();
     }
 
-    private string? ExtractZipEntry(string archivePath, string entryName)
-    {
-        using var archive = ZipFile.OpenRead(archivePath);
-        var entry = archive.GetEntry(entryName);
-        if (entry is null || entry.Length == 0)
-            return null;
-
-        var ext = Path.GetExtension(entry.Name);
-        if (string.IsNullOrEmpty(ext)) ext = ".jpg";
-
-        var tempPath = Path.Combine(Path.GetTempPath(), $"comic_{Guid.NewGuid():N}{ext}");
-        entry.ExtractToFile(tempPath, overwrite: true);
-        return tempPath;
-    }
-
-    private string? ExtractSevenZipEntry(string archivePath, string entryName)
-    {
-        using var archiveFile = new ArchiveFile(archivePath);
-        var imageEntry = archiveFile.Entries
-            .FirstOrDefault(e => string.Equals(e.FileName, entryName, StringComparison.OrdinalIgnoreCase));
-
-        if (imageEntry is null || imageEntry.IsFolder || imageEntry.Size == 0)
-            return null;
-
-        var ext = Path.GetExtension(imageEntry.FileName);
-        if (string.IsNullOrEmpty(ext)) ext = ".jpg";
-
-        var tempPath = Path.Combine(Path.GetTempPath(), $"comic_{Guid.NewGuid():N}{ext}");
-        imageEntry.Extract(tempPath);
-        return tempPath;
-    }
-
     /// <summary>
-    /// No-op cleanup. Temporary file lifecycle is managed by callers.
+    /// No-op cleanup. Extraction is fully in-memory; no temp files are created.
     /// </summary>
     public void Cleanup()
     {

@@ -163,7 +163,13 @@
                             Padding="4"
                             Width="180"
                             Cursor="Hand"
+                            ToolTipService.ShowDuration="15000"
                             Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}">
+                        <Border.ToolTip>
+                            <TextBlock Text="{Binding ArchivePath}"
+                                       TextWrapping="Wrap"
+                                       MaxWidth="400" />
+                        </Border.ToolTip>
                         <Border.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Copy path"
