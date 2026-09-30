@@ -168,6 +168,8 @@ internal sealed class SqliteVectorStore : IVectorStore
             cmd.Parameters.AddWithValue("@mn", modelName);
 
             using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+            int hits = 0;
+            int stale = 0;
             while (await reader.ReadAsync().ConfigureAwait(false))
             {
                 var filePath = reader.GetString(0);
@@ -181,12 +183,21 @@ internal sealed class SqliteVectorStore : IVectorStore
                 if (storedLm == currentLm.ToString("O") && storedFs == currentFs)
                 {
                     results[filePath] = Deserialize(reader.GetFieldValue<byte[]>(1));
+                    hits++;
                 }
                 else
                 {
-                    _logger?.LogDebug(
-                        "Stale (batch): {ModelName}/{FilePath}", modelName, filePath);
+                    stale++;
                 }
+            }
+
+            // One aggregated line per batch instead of one line per entry —
+            // per-entry debug output floods Output/DebugView during large searches
+            if (_logger is not null && (stale > 0 || hits < entries.Count))
+            {
+                _logger.LogDebug(
+                    "[VectorStore] Batch: {Requested} requested, {Hits} hit(s), {Stale} stale, {Missing} missing (model {ModelName})",
+                    entries.Count, hits, stale, entries.Count - hits - stale, modelName);
             }
         }
         finally

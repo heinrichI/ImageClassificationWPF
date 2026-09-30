@@ -52,6 +52,12 @@ public partial class ClassifyViewModel : ObservableObject
             return;
         }
 
+        if (!System.IO.Directory.Exists(SourceDirectory))
+        {
+            StatusText = $"Directory not found: {SourceDirectory}";
+            return;
+        }
+
         IsProcessing = true;
         StatusText = "Checking for timestamp conflicts...";
         Warnings.Clear();

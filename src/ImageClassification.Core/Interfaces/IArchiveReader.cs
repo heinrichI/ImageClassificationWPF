@@ -38,4 +38,13 @@ public interface IArchiveReader : IDisposable
     /// Returns the total number of image entries in the archive.
     /// </summary>
     Task<int> GetImageCountAsync(string archivePath);
+
+    /// <summary>
+    /// Opens the archive and returns a session that enumerates all image entries once
+    /// and can extract any page from the already-open handle (no re-open per page).
+    /// Never throws for unreadable or empty archives — an empty session
+    /// (<see cref="IArchiveSession.ImageEntries"/> is empty) is returned instead.
+    /// </summary>
+    /// <param name="archivePath">Full path to the .cbz/.cbr/.cb7/.cbt archive.</param>
+    Task<IArchiveSession> OpenSessionAsync(string archivePath);
 }

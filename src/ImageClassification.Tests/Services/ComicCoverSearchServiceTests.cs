@@ -43,7 +43,7 @@ public class ComicCoverSearchServiceTests
             Assert.NotNull(results);
             Assert.Empty(results);
             _mockArchiveReader.Verify(
-                r => r.ExtractImageToMemoryAsync(It.IsAny<string>(), It.IsAny<int>()), Times.Never);
+                r => r.OpenSessionAsync(It.IsAny<string>()), Times.Never);
         }
         finally
         {
@@ -72,10 +72,7 @@ public class ComicCoverSearchServiceTests
         var dummyCbz = Path.Combine(searchDir, "test.cbz");
         await File.WriteAllBytesAsync(dummyCbz, []);
 
-        _mockArchiveReader
-            .Setup(r => r.ExtractImageToMemoryAsync(dummyCbz, 0))
-            .ReturnsAsync((byte[]?)null);
-
+        // Default session (see CreateService): one page whose extraction yields null
         var service = CreateService();
 
         try
@@ -263,16 +260,236 @@ public class ComicCoverSearchServiceTests
             });
 
         var service = CreateService();
-        var progressValues = new List<(int Current, int Total)>();
+        var updates = new List<ComicSearchStatus>();
 
         try
         {
             await service.SearchAsync(searchDir, "test",
-                new Progress<(int Current, int Total)>(p => progressValues.Add(p)));
+                new Progress<ComicSearchStatus>(p => updates.Add(p)));
 
-            Assert.NotEmpty(progressValues);
-            Assert.Equal(1, progressValues.Last().Current);
-            Assert.Equal(1, progressValues.Last().Total);
+            Assert.NotEmpty(updates);
+            Assert.Equal(1, updates.Last().Current);
+            Assert.Equal(1, updates.Last().Total);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_ReportsStatusPhases_InOrder()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        await File.WriteAllBytesAsync(Path.Combine(searchDir, "test.cbz"), []);
+
+        var service = CreateService();
+        var status = new SyncProgress<ComicSearchStatus>();
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test", status: status);
+
+            // Phase order: covers mode — same five phases as all-pages
+            // (no separate page-count / cache-check phases anymore).
+            // Detail lines and counter ticks carry an empty Phase and are skipped.
+            var phases = status.Values.Where(v => v.Phase.Length > 0).Select(v => v.Phase).ToList();
+            string[] expected =
+            {
+                "Scanning archives...",
+                "Found 1 archive",
+                "Encoding query text...",
+                "Processing archives...",
+                "Scoring and ranking results..."
+            };
+
+            int last = -1;
+            foreach (var phase in expected)
+            {
+                var idx = phases.IndexOf(phase);
+                Assert.True(idx > last,
+                    $"Phase '{phase}' expected after index {last}. Actual sequence: {string.Join(" | ", phases)}");
+                last = idx;
+            }
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesAsync_OpensArchiveOnce_PerArchive()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var comicPath = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(comicPath, []);
+
+        var service = CreateService();
+
+        // Three pages, all extraction misses — the archive must still be opened
+        // exactly ONCE and every page extracted from that open session.
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null)));
+
+        try
+        {
+            await service.SearchAllPagesAsync(searchDir, "test");
+
+            _mockArchiveReader.Verify(r => r.OpenSessionAsync(comicPath), Times.Once);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesAsync_CachedPagesProduceResultsWithPageCount()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var comicPath = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(comicPath, []);
+
+        var service = CreateService();
+
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)));
+
+        // Both pages are in the embedding cache (keys "{path}|page=N") — no extraction needed
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = path.StartsWith($"{comicPath}|page=", StringComparison.Ordinal)
+                        ? CreateEmbedding(1f)
+                        : null;
+                return result;
+            });
+
+        try
+        {
+            var results = await service.SearchAllPagesAsync(searchDir, "test");
+
+            Assert.Equal(2, results.Count);
+            Assert.All(results, r => Assert.Equal(2, r.PageCount));
+            Assert.Contains(results, r => r.PageIndex == 0);
+            Assert.Contains(results, r => r.PageIndex == 1);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesAsync_ReportsStatusPhases_InOrder()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        await File.WriteAllBytesAsync(Path.Combine(searchDir, "test.cbz"), []);
+
+        var service = CreateService();
+
+        // Two pages; extraction yields nothing (cache misses) — phases must still be reported
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(It.IsAny<string>()))
+            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)));
+
+        var status = new SyncProgress<ComicSearchStatus>();
+
+        try
+        {
+            await service.SearchAllPagesAsync(searchDir, "test", status: status);
+
+            // Phases must arrive in pipeline order (no separate page-count phase);
+            // detail lines and counter ticks carry an empty Phase and are skipped
+            var phases = status.Values.Where(v => v.Phase.Length > 0).Select(v => v.Phase).ToList();
+            string[] expected =
+            {
+                "Scanning archives...",
+                "Found 1 archive",
+                "Encoding query text...",
+                "Processing archives...",
+                "Scoring and ranking results..."
+            };
+
+            int last = -1;
+            foreach (var phase in expected)
+            {
+                var idx = phases.IndexOf(phase);
+                Assert.True(idx > last,
+                    $"Phase '{phase}' expected after index {last}. Actual sequence: {string.Join(" | ", phases)}");
+                last = idx;
+            }
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_ReportsGpuQueueDetailInStatus()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        await File.WriteAllBytesAsync(Path.Combine(searchDir, "test.cbz"), []);
+
+        var service = CreateService();
+        var status = new SyncProgress<ComicSearchStatus>();
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test", status: status);
+
+            // A detail update with the GPU-queue state must be reported during processing
+            var detail = status.Values.FirstOrDefault(v => v.Detail is not null);
+            Assert.NotNull(detail);
+            Assert.Contains("GPU", detail!.Detail);
+            Assert.Contains("queue", detail.Detail);
+            Assert.NotNull(detail.GpuQueueDepth);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_LogsCacheSummaryLine()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        await File.WriteAllBytesAsync(Path.Combine(searchDir, "test.cbz"), []);
+
+        // Set up the shared mocks (via CreateService), then build a service
+        // with a capturing logger to inspect the formatted log lines
+        CreateService();
+        var logger = new CapturingLogger();
+        var service = new ComicCoverSearchService(
+            _mockArchiveReader.Object,
+            _mockClipTextEncoder.Object,
+            _mockVectorStore.Object,
+            _batchEncoder,
+            logger);
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test");
+
+            Assert.Contains(logger.Messages, m =>
+                m.StartsWith("[Pipeline] Cache summary:", StringComparison.Ordinal));
         }
         finally
         {
@@ -315,6 +532,13 @@ public class ComicCoverSearchServiceTests
                 return Task.FromResult(result);
             });
 
+        // Default archive session: a single page whose extraction yields null —
+        // tests that need real results either override the session per path or
+        // serve embeddings from the mocked vector store (cache hits).
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(It.IsAny<string>()))
+            .ReturnsAsync(CreateSession(("page0.jpg", (byte[]?)null)));
+
         return new ComicCoverSearchService(
             _mockArchiveReader.Object,
             _mockClipTextEncoder.Object,
@@ -323,10 +547,62 @@ public class ComicCoverSearchServiceTests
             mockLogger.Object);
     }
 
+    /// <summary>
+    /// Builds a mocked archive session with the given pages (name + extracted bytes;
+    /// null bytes simulate extraction failure).
+    /// </summary>
+    private static IArchiveSession CreateSession(params (string Name, byte[]? Bytes)[] pages)
+    {
+        var session = new Mock<IArchiveSession>();
+        session.Setup(s => s.ImageEntries)
+            .Returns(pages.Select(p => p.Name).ToList());
+        session.Setup(s => s.ExtractToMemoryAsync(It.IsAny<int>()))
+            .ReturnsAsync((int index) => index >= 0 && index < pages.Length ? pages[index].Bytes : null);
+        return session.Object;
+    }
+
     private static float[] CreateEmbedding(float firstValue)
     {
         var vector = new float[512];
         vector[0] = firstValue;
         return vector;
+    }
+
+    /// <summary>
+    /// Minimal ILogger that records formatted messages (Information and above)
+    /// for assertions on log content.
+    /// </summary>
+    private sealed class CapturingLogger : ILogger<ComicCoverSearchService>
+    {
+        private readonly object _lock = new();
+        public List<string> Messages { get; } = new();
+
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+
+        public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information;
+
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception,
+            Func<TState, Exception?, string> formatter)
+        {
+            if (!IsEnabled(logLevel)) return;
+            lock (_lock) Messages.Add(formatter(state, exception));
+        }
+    }
+
+    /// <summary>
+    /// Deterministic IProgress that records values synchronously on the reporting
+    /// thread (unlike Progress&lt;T&gt; which posts to a SynchronizationContext).
+    /// Thread-safe: the service may report from producer (thread-pool) and
+    /// consumer (calling) threads concurrently.
+    /// </summary>
+    private sealed class SyncProgress<T> : IProgress<T>
+    {
+        private readonly object _lock = new();
+        public List<T> Values { get; } = new();
+
+        public void Report(T value)
+        {
+            lock (_lock) Values.Add(value);
+        }
     }
 }

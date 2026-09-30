@@ -74,6 +74,12 @@ public partial class AnalyzeViewModel : ObservableObject
             return;
         }
 
+        if (!Directory.Exists(SourceDirectory))
+        {
+            StatusText = $"Directory not found: {SourceDirectory}";
+            return;
+        }
+
         IsProcessing = true;
         StatusText = "Loading model...";
         Clusters.Clear();

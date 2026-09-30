@@ -28,21 +28,100 @@ public class ComicCoverSearchViewModelTests
 
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
-        public Task<List<ComicCoverResult>> SearchAsync(string directoryPath, string query, IProgress<(int Current, int Total)>? progress = null, CancellationToken ct = default)
+        public Task<List<ComicCoverResult>> SearchAsync(string directoryPath, string query, IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
         {
+            status?.Report(new ComicSearchStatus { Phase = "Extracting & encoding covers (GPU)..." });
             return Task.FromResult(_results.ToList());
         }
 
         public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
 
-        public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query, IProgress<(int Current, int Total)>? progress = null, CancellationToken ct = default)
+        public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query, IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
         {
+            status?.Report(new ComicSearchStatus { Phase = "Extracting & encoding pages (GPU)..." });
             return Task.FromResult(_results.ToList());
         }
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 
         public void Dispose() { }
+    }
+
+    /// <summary>
+    /// Reports one status phase and one progress tick, then waits until the test
+    /// completes the gate — used to observe the in-flight StatusMessage.
+    /// </summary>
+    private sealed class GatedSearchService : IComicCoverSearchService
+    {
+        private readonly List<ComicCoverResult> _results;
+
+        public TaskCompletionSource<bool> Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public GatedSearchService(List<ComicCoverResult> results) => _results = results;
+
+        public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
+
+        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+
+        public Task ClearCacheAsync() => Task.CompletedTask;
+
+        public void Dispose() { }
+
+        public Task<List<ComicCoverResult>> SearchAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+        {
+            status?.Report(new ComicSearchStatus { Phase = "Extracting & encoding covers (GPU)..." });
+            status?.Report(new ComicSearchStatus { Current = 1, Total = 5 });
+
+            return Gate.Task.ContinueWith(
+                _ => _results.ToList(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, query, status, ct);
+    }
+
+    /// <summary>
+    /// Reports one FULL detail status update (Detail set) and one progress tick,
+    /// then waits on the gate — used to verify the detail line is shown verbatim,
+    /// without the progress counter appended.
+    /// </summary>
+    private sealed class DetailGatedSearchService : IComicCoverSearchService
+    {
+        public const string DetailLine = "Processing archives: 1/2 · GPU 1 batches · queue 0";
+
+        public TaskCompletionSource<bool> Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
+
+        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+
+        public Task ClearCacheAsync() => Task.CompletedTask;
+
+        public void Dispose() { }
+
+        public Task<List<ComicCoverResult>> SearchAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+        {
+            status?.Report(new ComicSearchStatus { Detail = DetailLine, Current = 1, Total = 2 });
+
+            return Gate.Task.ContinueWith(
+                _ => new List<ComicCoverResult>
+                {
+                    new ComicCoverResult { ArchivePath = "a1", ArchiveFileName = "a1.cbr", SimilarityScore = 0.9f }
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+        }
+
+        public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, query, status, ct);
     }
 
     [Fact]
@@ -63,7 +142,7 @@ public class ComicCoverSearchViewModelTests
 
         var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
-            DirectoryPath = "any",
+            DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
             QueryText = "q",
             SimilarityThreshold = 0.25 // double
         };
@@ -134,6 +213,109 @@ public class ComicCoverSearchViewModelTests
     }
 
     [Fact]
+    public async Task SearchAsync_PhaseShownInStatusMessage_WhileSearching()
+    {
+        // Arrange: service reports a phase + (1/5) progress, then blocks on the gate
+        var results = new List<ComicCoverResult>
+        {
+            new ComicCoverResult { ArchivePath = "a1", ArchiveFileName = "a1.cbr", SimilarityScore = 0.9f }
+        };
+        var fakeService = new GatedSearchService(results);
+        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
+        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+        var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
+
+        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        {
+            DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
+            QueryText = "q",
+            SimilarityThreshold = 0.25
+        };
+
+        var mi = typeof(ComicCoverSearchViewModel).GetMethod("SearchAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var searchTask = (Task)mi.Invoke(vm, null)!;
+
+        // Wait until the VM reflected both the phase and the counter in StatusMessage
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!vm.StatusMessage.Contains("/5", StringComparison.Ordinal) && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        Assert.Contains("Extracting & encoding covers (GPU)", vm.StatusMessage);
+        Assert.Contains("1/5", vm.StatusMessage);
+
+        // Release the gate and verify the final message replaces the phase
+        fakeService.Gate.SetResult(true);
+        await searchTask;
+
+        Assert.StartsWith("Found 1 matching covers", vm.StatusMessage);
+    }
+
+    [Fact]
+    public async Task SearchAsync_FullDetailStatusLine_ShownAsIs()
+    {
+        // Arrange: service reports a full detail line (no trailing "...") + (1/2) progress,
+        // then blocks on the gate
+        var fakeService = new DetailGatedSearchService();
+        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
+        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+        var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
+
+        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        {
+            DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
+            QueryText = "q",
+            SimilarityThreshold = 0.25
+        };
+
+        var mi = typeof(ComicCoverSearchViewModel).GetMethod("SearchAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var searchTask = (Task)mi.Invoke(vm, null)!;
+
+        // Wait until the detail line reached the UI
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!vm.StatusMessage.Contains("queue", StringComparison.Ordinal) && DateTime.UtcNow < deadline)
+            await Task.Delay(25);
+
+        // The line is shown verbatim — the (1/2) progress counter is NOT appended
+        Assert.Equal(DetailGatedSearchService.DetailLine, vm.StatusMessage);
+
+        // Release the gate and verify the final message replaces the detail line
+        fakeService.Gate.SetResult(true);
+        await searchTask;
+
+        Assert.StartsWith("Found 1 matching covers", vm.StatusMessage);
+    }
+
+    [Fact]
+    public async Task SearchAsync_NonExistentDirectory_ReportsErrorWithoutSearching()
+    {
+        // Arrange: fake that would produce results if the search actually ran
+        var results = new List<ComicCoverResult>
+        {
+            new ComicCoverResult { ArchivePath = "a1", ArchiveFileName = "a1.cbr", SimilarityScore = 0.9f }
+        };
+        var fakeService = new FakeSearchService(results);
+        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
+        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+        var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
+        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        {
+            DirectoryPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "definitely_missing_dir_" + Guid.NewGuid().ToString("N")),
+            QueryText = "q"
+        };
+
+        // Act
+        var mi = typeof(ComicCoverSearchViewModel).GetMethod("SearchAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        await (Task)mi.Invoke(vm, null)!;
+
+        // Assert: search was short-circuited before the service call
+        Assert.Empty(vm.Results);
+        Assert.Contains("Directory not found", vm.StatusMessage);
+    }
+
+    [Fact]
     public async Task CopyResultsImagesCommand_Enabled_AfterSearchCompletes()
     {
         // Arrange: results that pass the threshold
@@ -149,7 +331,7 @@ public class ComicCoverSearchViewModelTests
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
         var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
-            DirectoryPath = "any",
+            DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
             QueryText = "q",
             SimilarityThreshold = 0.25
         };

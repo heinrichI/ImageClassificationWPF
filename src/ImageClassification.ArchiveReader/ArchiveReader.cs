@@ -1,5 +1,4 @@
 using System.IO.Compression;
-using System.Text.RegularExpressions;
 using ImageClassification.Core.Interfaces;
 using SevenZipExtractor;
 
@@ -9,7 +8,13 @@ namespace ImageClassification.ArchiveReader;
 /// Reads CBZ/CBR/CB7 archives and extracts images.
 /// CBZ (ZIP) is handled via System.IO.Compression (fully managed, fast).
 /// CBR/CB7 use SevenZipExtractor with native 7z.dll.
-/// Thread-safe for concurrent extraction across a shared instance.
+///
+/// <see cref="OpenSessionAsync"/> is the primary entry point for bulk processing:
+/// it opens the archive ONCE and returns a session from which any number of pages
+/// can be extracted without re-opening the archive or re-reading its index.
+/// The legacy per-page methods delegate to a session as well.
+/// Thread-safe for concurrent use across a shared instance; a single
+/// IArchiveSession should be consumed by one consumer at a time.
 /// </summary>
 internal sealed class ArchiveReader : IArchiveReader
 {
@@ -37,153 +42,36 @@ internal sealed class ArchiveReader : IArchiveReader
     /// <inheritdoc />
     public async Task<byte[]?> ExtractImageToMemoryAsync(string archivePath, int index)
     {
-        if (string.IsNullOrWhiteSpace(archivePath))
-            throw new ArgumentException("Archive path must not be null or empty.", nameof(archivePath));
-
-        if (!File.Exists(archivePath))
-            return null;
-
-        if (index < 0)
-            return null;
-
-        try
-        {
-            var entries = GetSortedImageEntries(archivePath);
-            if (index >= entries.Count)
-                return null;
-
-            var (entryName, _) = entries[index];
-            return await ExtractEntryToMemoryAsync(archivePath, entryName).ConfigureAwait(false);
-        }
-        catch (Exception)
-        {
-            return null;
-        }
+        using var session = await OpenSessionAsync(archivePath).ConfigureAwait(false);
+        return await session.ExtractToMemoryAsync(index).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
-    public Task<int> GetImageCountAsync(string archivePath)
+    public async Task<int> GetImageCountAsync(string archivePath)
+    {
+        using var session = await OpenSessionAsync(archivePath).ConfigureAwait(false);
+        return session.ImageEntries.Count;
+    }
+
+    /// <inheritdoc />
+    public Task<IArchiveSession> OpenSessionAsync(string archivePath)
     {
         if (string.IsNullOrWhiteSpace(archivePath) || !File.Exists(archivePath))
-            return Task.FromResult(0);
+            return Task.FromResult<IArchiveSession>(EmptyArchiveSession.Instance);
 
         try
         {
-            var entries = GetSortedImageEntries(archivePath);
-            return Task.FromResult(entries.Count);
+            if (archivePath.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase))
+                return Task.FromResult<IArchiveSession>(new ZipArchiveSession(archivePath));
+
+            return Task.FromResult<IArchiveSession>(new SevenZipArchiveSession(archivePath));
         }
         catch
         {
-            return Task.FromResult(0);
+            // Corrupt/unsupported container — treat as an empty archive so callers
+            // can skip it without special-casing failures.
+            return Task.FromResult<IArchiveSession>(EmptyArchiveSession.Instance);
         }
-    }
-
-    /// <summary>
-    /// Lists all image entries from the archive, sorted deterministically.
-    /// For CBZ (ZIP), entries are read via System.IO.Compression.
-    /// For CBR/CB7/CBT, entries are read via SevenZipExtractor.
-    /// </summary>
-    private List<(string EntryName, ImageEntrySortKey SortKey)> GetSortedImageEntries(string archivePath)
-    {
-        if (archivePath.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase))
-            return GetSortedZipEntries(archivePath);
-        return GetSortedSevenZipEntries(archivePath);
-    }
-
-    private List<(string EntryName, ImageEntrySortKey SortKey)> GetSortedZipEntries(string archivePath)
-    {
-        using var archive = ZipFile.OpenRead(archivePath);
-        var entries = new List<(string EntryName, ImageEntrySortKey SortKey)>(archive.Entries.Count);
-
-        for (int i = 0; i < archive.Entries.Count; i++)
-        {
-            var entry = archive.Entries[i];
-            if (entry.Length > 0 && ImageExtensions.Contains(Path.GetExtension(entry.Name)))
-            {
-                entries.Add((entry.FullName, BuildSortKey(entry.Name, i)));
-            }
-        }
-
-        entries.Sort(CompareImageEntries);
-        return entries;
-    }
-
-    private List<(string EntryName, ImageEntrySortKey SortKey)> GetSortedSevenZipEntries(string archivePath)
-    {
-        using var archiveFile = new ArchiveFile(archivePath);
-        var entries = new List<(string EntryName, ImageEntrySortKey SortKey)>(archiveFile.Entries.Count);
-
-        for (int i = 0; i < archiveFile.Entries.Count; i++)
-        {
-            var entry = archiveFile.Entries[i];
-            if (!entry.IsFolder && entry.Size > 0 &&
-                ImageExtensions.Contains(Path.GetExtension(entry.FileName)))
-            {
-                entries.Add((entry.FileName, BuildSortKey(entry.FileName, i)));
-            }
-        }
-
-        entries.Sort(CompareImageEntries);
-        return entries;
-    }
-
-    private static int CompareImageEntries(
-        (string EntryName, ImageEntrySortKey SortKey) a,
-        (string EntryName, ImageEntrySortKey SortKey) b)
-    {
-        var nameCompare = StringComparer.OrdinalIgnoreCase.Compare(
-            a.SortKey.NormalizedFileName,
-            b.SortKey.NormalizedFileName);
-        if (nameCompare != 0)
-            return nameCompare;
-
-        return a.SortKey.FallbackIndex.CompareTo(b.SortKey.FallbackIndex);
-    }
-
-    private static ImageEntrySortKey BuildSortKey(string fileName, int fallbackIndex)
-    {
-        var normalizedFileName = Path.GetFileName(fileName);
-
-        return new ImageEntrySortKey(
-            NormalizedFileName: normalizedFileName,
-            FallbackIndex: fallbackIndex);
-    }
-
-    /// <summary>
-    /// Extracts a single entry from the archive to an in-memory byte array.
-    /// </summary>
-    private async Task<byte[]?> ExtractEntryToMemoryAsync(string archivePath, string entryName)
-    {
-        if (archivePath.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase))
-            return await ExtractZipEntryToMemoryAsync(archivePath, entryName).ConfigureAwait(false);
-        return ExtractSevenZipEntryToMemory(archivePath, entryName);
-    }
-
-    private async Task<byte[]?> ExtractZipEntryToMemoryAsync(string archivePath, string entryName)
-    {
-        using var archive = ZipFile.OpenRead(archivePath);
-        var entry = archive.GetEntry(entryName);
-        if (entry is null || entry.Length == 0)
-            return null;
-
-        await using var entryStream = entry.Open();
-        using var memory = new MemoryStream();
-        await entryStream.CopyToAsync(memory).ConfigureAwait(false);
-        return memory.ToArray();
-    }
-
-    private byte[]? ExtractSevenZipEntryToMemory(string archivePath, string entryName)
-    {
-        using var archiveFile = new ArchiveFile(archivePath);
-        var imageEntry = archiveFile.Entries
-            .FirstOrDefault(e => string.Equals(e.FileName, entryName, StringComparison.OrdinalIgnoreCase));
-
-        if (imageEntry is null || imageEntry.IsFolder || imageEntry.Size == 0)
-            return null;
-
-        using var memory = new MemoryStream();
-        imageEntry.Extract(memory);
-        return memory.ToArray();
     }
 
     /// <summary>
@@ -198,5 +86,143 @@ internal sealed class ArchiveReader : IArchiveReader
     {
         Cleanup();
         GC.SuppressFinalize(this);
+    }
+
+    private static ImageEntrySortKey BuildSortKey(string fileName, int fallbackIndex)
+    {
+        return new ImageEntrySortKey(Path.GetFileName(fileName), fallbackIndex);
+    }
+
+    // ── Session implementations ─────────────────────────────────────────────
+
+    /// <summary>
+    /// Session for archives that cannot be opened or that contain no image entries.
+    /// </summary>
+    private sealed class EmptyArchiveSession : IArchiveSession
+    {
+        public static readonly EmptyArchiveSession Instance = new();
+
+        public IReadOnlyList<string> ImageEntries { get; } = Array.Empty<string>();
+
+        public Task<byte[]?> ExtractToMemoryAsync(int index) => Task.FromResult<byte[]?>(null);
+
+        public void Dispose()
+        {
+        }
+    }
+
+    /// <summary>
+    /// Session backed by a kept-open <see cref="ZipArchive"/> (CBZ).
+    /// Image entries are enumerated once in the constructor; extraction reuses
+    /// the open handle. Disposing the session closes the archive and its file stream.
+    /// </summary>
+    private sealed class ZipArchiveSession : IArchiveSession
+    {
+        private readonly ZipArchive _archive;
+        private readonly List<ZipArchiveEntry> _entries; // sorted image entries
+        private readonly string[] _entryNames;
+
+        public ZipArchiveSession(string archivePath)
+        {
+            var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            _archive = new ZipArchive(stream, ZipArchiveMode.Read, leaveOpen: false);
+
+            var candidates = new List<(ZipArchiveEntry Entry, ImageEntrySortKey Key)>(_archive.Entries.Count);
+            for (int i = 0; i < _archive.Entries.Count; i++)
+            {
+                var entry = _archive.Entries[i];
+                if (entry.Length > 0 && ImageExtensions.Contains(Path.GetExtension(entry.Name)))
+                {
+                    candidates.Add((entry, BuildSortKey(entry.Name, i)));
+                }
+            }
+
+            _entries = candidates
+                .OrderBy(c => c.Key.NormalizedFileName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(c => c.Key.FallbackIndex)
+                .Select(c => c.Entry)
+                .ToList();
+
+            _entryNames = _entries.Select(e => e.FullName).ToArray();
+        }
+
+        public IReadOnlyList<string> ImageEntries => _entryNames;
+
+        public async Task<byte[]?> ExtractToMemoryAsync(int index)
+        {
+            if (index < 0 || index >= _entries.Count)
+                return null;
+
+            try
+            {
+                await using var entryStream = _entries[index].Open();
+                using var memory = new MemoryStream();
+                await entryStream.CopyToAsync(memory).ConfigureAwait(false);
+                return memory.ToArray();
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public void Dispose() => _archive.Dispose();
+    }
+
+    /// <summary>
+    /// Session backed by a kept-open SevenZipExtractor <see cref="ArchiveFile"/>
+    /// (CBR/CB7/CBT). Image entries are enumerated once in the constructor;
+    /// extraction reuses the open handle.
+    /// </summary>
+    private sealed class SevenZipArchiveSession : IArchiveSession
+    {
+        private readonly ArchiveFile _archiveFile;
+        private readonly List<Entry> _entries; // sorted image entries
+        private readonly string[] _entryNames;
+
+        public SevenZipArchiveSession(string archivePath)
+        {
+            _archiveFile = new ArchiveFile(archivePath);
+
+            var candidates = new List<(Entry Entry, ImageEntrySortKey Key)>(_archiveFile.Entries.Count);
+            for (int i = 0; i < _archiveFile.Entries.Count; i++)
+            {
+                var entry = _archiveFile.Entries[i];
+                if (!entry.IsFolder && entry.Size > 0 &&
+                    ImageExtensions.Contains(Path.GetExtension(entry.FileName)))
+                {
+                    candidates.Add((entry, BuildSortKey(entry.FileName, i)));
+                }
+            }
+
+            _entries = candidates
+                .OrderBy(c => c.Key.NormalizedFileName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(c => c.Key.FallbackIndex)
+                .Select(c => c.Entry)
+                .ToList();
+
+            _entryNames = _entries.Select(e => e.FileName).ToArray();
+        }
+
+        public IReadOnlyList<string> ImageEntries => _entryNames;
+
+        public Task<byte[]?> ExtractToMemoryAsync(int index)
+        {
+            if (index < 0 || index >= _entries.Count)
+                return Task.FromResult<byte[]?>(null);
+
+            try
+            {
+                using var memory = new MemoryStream();
+                _entries[index].Extract(memory);
+                return Task.FromResult<byte[]?>(memory.ToArray());
+            }
+            catch
+            {
+                return Task.FromResult<byte[]?>(null);
+            }
+        }
+
+        public void Dispose() => _archiveFile.Dispose();
     }
 }

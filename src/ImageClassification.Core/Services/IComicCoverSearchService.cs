@@ -16,20 +16,28 @@ public interface IComicCoverSearchService : IDisposable
     /// Scans a directory tree for CBZ/CBR archives, extracts covers, computes embeddings,
     /// and ranks them by similarity to the given text query.
     /// </summary>
+    /// <param name="status">Optional reporter for the unified status channel
+    /// (<see cref="ComicSearchStatus"/>): phase markers, preformatted detail lines,
+    /// progress-bar values (Current/Total = processed/found archives) and GPU-queue state.
+    /// The UI shows <c>Detail</c> verbatim and combines <c>Phase</c> with the progress counter.</param>
     Task<List<ComicCoverResult>> SearchAsync(
         string directoryPath,
         string query,
-        IProgress<(int Current, int Total)>? progress = null,
+        IProgress<ComicSearchStatus>? status = null,
         CancellationToken ct = default);
 
     /// <summary>
     /// Scans a directory tree for CBZ/CBR archives, extracts ALL image pages,
     /// computes embeddings for each page, and ranks them by similarity to the given text query.
     /// </summary>
+    /// <param name="status">Optional reporter for the unified status channel
+    /// (<see cref="ComicSearchStatus"/>): phase markers, preformatted detail lines,
+    /// progress-bar values (Current/Total = processed/found archives) and GPU-queue state.
+    /// The UI shows <c>Detail</c> verbatim and combines <c>Phase</c> with the progress counter.</param>
     Task<List<ComicCoverResult>> SearchAllPagesAsync(
         string directoryPath,
         string query,
-        IProgress<(int Current, int Total)>? progress = null,
+        IProgress<ComicSearchStatus>? status = null,
         CancellationToken ct = default);
 
     /// <summary>

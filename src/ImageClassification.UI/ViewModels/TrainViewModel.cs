@@ -86,6 +86,19 @@ public partial class TrainViewModel : ObservableObject
             return;
         }
 
+        if (!System.IO.Directory.Exists(TrainingDirectory))
+        {
+            StatusText = $"Training directory not found: {TrainingDirectory}";
+            return;
+        }
+
+        var saveDir = System.IO.Path.GetDirectoryName(SaveModelPath);
+        if (!string.IsNullOrEmpty(saveDir) && !System.IO.Directory.Exists(saveDir))
+        {
+            StatusText = $"Directory for save path not found: {saveDir}";
+            return;
+        }
+
         IsTraining = true;
         StatusText = "Training...";
 

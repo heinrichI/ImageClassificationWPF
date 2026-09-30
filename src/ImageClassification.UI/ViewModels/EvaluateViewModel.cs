@@ -48,6 +48,12 @@ public partial class EvaluateViewModel : ObservableObject
             return;
         }
 
+        if (!System.IO.Directory.Exists(TestDirectory))
+        {
+            StatusText = $"Directory not found: {TestDirectory}";
+            return;
+        }
+
         IsEvaluating = true;
         StatusText = "Evaluating...";
 

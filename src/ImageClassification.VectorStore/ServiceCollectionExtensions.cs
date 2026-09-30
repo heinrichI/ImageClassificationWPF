@@ -10,7 +10,7 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class VectorStoreServiceCollectionExtensions
 {
     /// <summary>
-    /// Registers <see cref="IVectorStore"/> as a singleton backed by SQLite.
+    /// Registers <see cref="IVectorStore"/> (SQLite-backed embedding cache) as a singleton.
     /// </summary>
     public static IServiceCollection AddVectorStore(this IServiceCollection services)
     {

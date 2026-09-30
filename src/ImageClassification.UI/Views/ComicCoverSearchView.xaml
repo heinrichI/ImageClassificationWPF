@@ -28,7 +28,6 @@
                 </Grid.ColumnDefinitions>
                 <TextBox Grid.Column="0"
                          Text="{Binding DirectoryPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         IsReadOnly="True"
                          VerticalAlignment="Center"
                          Margin="0,0,5,0" />
                 <Button Grid.Column="1"
@@ -141,6 +140,7 @@
                    Text="{Binding StatusMessage}"
                    HorizontalAlignment="Center"
                    VerticalAlignment="Center"
+                   TextWrapping="Wrap"
                    Visibility="{Binding StatusMessage, Converter={StaticResource NonEmptyStringToVisibilityConverter}}"
                    Margin="0,0,0,5" />
 

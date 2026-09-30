@@ -6,13 +6,20 @@ using Microsoft.Extensions.Logging;
 namespace ImageClassification.Core.Services;
 
 /// <summary>
-/// Scans CBZ/CBR archives, extracts covers or all pages, and ranks them
-/// by CLIP cosine similarity against a user text query.
+/// Scans CBZ/CBR archives and ranks their covers (or all pages) by CLIP
+/// cosine similarity against a user text query.
 /// Uses BatchImageEncoder for batched GPU inference and IVectorStore for caching.
+///
+/// Pipeline: each archive is opened exactly once via IArchiveReader.OpenSessionAsync;
+/// image entries are enumerated once from the open handle, cache hits are taken
+/// directly from the vector store, and only misses are extracted (from the same
+/// open handle) and fed to the GPU batch encoder. There is no separate page-count
+/// phase — the progress bar counts processed archives.
 /// </summary>
 internal sealed class ComicCoverSearchService : IComicCoverSearchService
 {
     private const string ModelName = "ClipViTB32";
+    private const int ArchiveParallelism = 4; // archives opened/processed concurrently
     private static readonly string[] ArchivePatterns = { "*.cbz", "*.cbr", "*.cb7", "*.cbt" };
 
     private readonly IArchiveReader _archiveReader;
@@ -35,6 +42,29 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
+    // ── Cancellation-safe reporting helpers (В2) ────────────────────────
+
+    /// <summary>
+    /// Reports a status phase unless the operation has been cancelled,
+    /// so late reports can't overwrite the "Search cancelled." UI state.
+    /// </summary>
+    private static void ReportPhase(IProgress<ComicSearchStatus>? status, CancellationToken ct, string phase)
+    {
+        if (status is not null && !ct.IsCancellationRequested)
+            status.Report(new ComicSearchStatus { Phase = phase });
+    }
+
+    /// <summary>
+    /// Reports a progress-bar tick (processed / found archives) unless the operation
+    /// has been cancelled.
+    /// </summary>
+    private static void ReportProgressTick(IProgress<ComicSearchStatus>? status, CancellationToken ct,
+        int current, int total)
+    {
+        if (status is not null && !ct.IsCancellationRequested)
+            status.Report(new ComicSearchStatus { Current = current, Total = total });
+    }
+
     /// <inheritdoc />
     public Task LoadModelAsync(string clipOnnxPath)
     {
@@ -43,266 +73,343 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     }
 
     /// <inheritdoc />
-    public async Task<List<ComicCoverResult>> SearchAsync(
+    public Task<List<ComicCoverResult>> SearchAsync(
         string directoryPath,
         string query,
-        IProgress<(int Current, int Total)>? progress = null,
+        IProgress<ComicSearchStatus>? status = null,
         CancellationToken ct = default)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        _logger.LogInformation("[Search] Started — query='{Query}' dir='{Dir}'", query, directoryPath);
-
-        if (!Directory.Exists(directoryPath))
-        {
-            _logger.LogWarning("[Search] Directory not found: {Dir}", directoryPath);
-            return new List<ComicCoverResult>();
-        }
-
-        // 1. Scan archives
-        var t0 = sw.Elapsed;
-        var archiveFiles = ScanArchivesRecursive(directoryPath);
-        _logger.LogInformation("[Search] Scan: {Count} archives found in {Ms}ms",
-            archiveFiles.Count, (sw.Elapsed - t0).TotalMilliseconds);
-
-        if (archiveFiles.Count == 0)
-            return new List<ComicCoverResult>();
-
-        // 2. Encode the text query once
-        t0 = sw.Elapsed;
-        var textQuery = $"a photo of {query}";
-        var queryEmbedding = await _textEncoder.EncodeTextAsync(textQuery, ct).ConfigureAwait(false);
-        _logger.LogInformation("[Search] Text encoding: {Ms}ms", (sw.Elapsed - t0).TotalMilliseconds);
-
-        // 3. Batch-check cache — one DB round-trip
-        t0 = sw.Elapsed;
-        var entries = BuildMetaEntries(archiveFiles);
-        var cacheResults = await BatchGetCacheAsync(entries).ConfigureAwait(false);
-        int cacheHits = cacheResults.Count(kvp => kvp.Value is not null);
-        _logger.LogInformation("[Search] Cache check: {Hits}/{Total} hits in {Ms}ms",
-            cacheHits, archiveFiles.Count, (sw.Elapsed - t0).TotalMilliseconds);
-
-        // 4. Identify cache misses
-        var misses = new List<(int OriginalIndex, string ArchivePath, int PageIndex, string CacheKey, DateTime LastModified, long FileSize)>();
-        var results = new (string ArchivePath, float[]? Embedding)[archiveFiles.Count];
-
-        for (int i = 0; i < archiveFiles.Count; i++)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            var archivePath = archiveFiles[i];
-            cacheResults.TryGetValue(archivePath, out var cached);
-            var (_, lm, fs) = entries[i];
-
-            results[i] = (archivePath, cached);
-
-            if (cached is null)
-            {
-                misses.Add((i, archivePath, 0, archivePath, lm, fs));
-            }
-        }
-
-        _logger.LogInformation("[Search] Misses: {Misses}, cache hits: {Hits}",
-            misses.Count, archiveFiles.Count - misses.Count);
-
-        _logger.LogInformation("[Search] Reporting initial progress: {Current}/{Total}", cacheHits, archiveFiles.Count);
-        progress?.Report((cacheHits, archiveFiles.Count));
-
-        if (misses.Count > 0)
-        {
-            t0 = sw.Elapsed;
-            await RunProducerConsumerAsync(misses, results, archiveFiles.Count, cacheHits, progress, ct).ConfigureAwait(false);
-            _logger.LogInformation("[Search] Producer/consumer pipeline completed in {Ms}ms",
-                (sw.Elapsed - t0).TotalMilliseconds);
-        }
-        else
-        {
-            _logger.LogInformation("[Search] All archives were resolved from cache, extraction/inference skipped");
-        }
-
-        // 5. Score + sort
-        var output = new List<ComicCoverResult>(archiveFiles.Count);
-        for (int i = 0; i < archiveFiles.Count; i++)
-        {
-            var (archivePath, embedding) = results[i];
-            if (embedding is null) continue;
-
-            output.Add(new ComicCoverResult
-            {
-                ArchivePath = archivePath,
-                ArchiveFileName = Path.GetFileName(archivePath),
-                SimilarityScore = CosineSimilarity(embedding, queryEmbedding),
-                PageIndex = 0,
-                PageCount = 1
-            });
-        }
-
-        _logger.LogInformation("[Search] Reporting final progress: {Current}/{Total}", archiveFiles.Count, archiveFiles.Count);
-        progress?.Report((archiveFiles.Count, archiveFiles.Count));
-        _logger.LogInformation("[Search] Done: {Results} results, top score={TopScore:F4}, total={TotalMs}ms",
-            output.Count,
-            output.Count > 0 ? output.Max(x => x.SimilarityScore) : 0f,
-            sw.ElapsedMilliseconds);
-
-        return output.OrderByDescending(x => x.SimilarityScore).ToList();
+        return SearchCoreAsync(directoryPath, query, allPages: false, status, ct);
     }
 
     /// <inheritdoc />
-    public async Task<List<ComicCoverResult>> SearchAllPagesAsync(
+    public Task<List<ComicCoverResult>> SearchAllPagesAsync(
         string directoryPath,
         string query,
-        IProgress<(int Current, int Total)>? progress = null,
+        IProgress<ComicSearchStatus>? status = null,
         CancellationToken ct = default)
     {
+        return SearchCoreAsync(directoryPath, query, allPages: true, status, ct);
+    }
+
+    /// <summary>
+    /// Shared pipeline for both modes. The only difference: covers mode processes
+    /// page 0 of each archive, all-pages mode processes every enumerated page.
+    /// </summary>
+    private async Task<List<ComicCoverResult>> SearchCoreAsync(
+        string directoryPath,
+        string query,
+        bool allPages,
+        IProgress<ComicSearchStatus>? status,
+        CancellationToken ct)
+    {
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _logger.LogInformation("[SearchAllPages] Started — query='{Query}' dir='{Dir}'", query, directoryPath);
+        var label = allPages ? "SearchAllPages" : "Search";
+        _logger.LogInformation("[{Label}] Started — query='{Query}' dir='{Dir}'", label, query, directoryPath);
 
         if (!Directory.Exists(directoryPath))
         {
-            _logger.LogWarning("[SearchAllPages] Directory not found: {Dir}", directoryPath);
+            _logger.LogWarning("[{Label}] Directory not found: {Dir}", label, directoryPath);
             return new List<ComicCoverResult>();
         }
 
         // 1. Scan archives
+        ReportPhase(status, ct, "Scanning archives...");
         var t0 = sw.Elapsed;
         var archiveFiles = ScanArchivesRecursive(directoryPath);
-        _logger.LogInformation("[SearchAllPages] Scan: {Count} archives in {Ms}ms",
-            archiveFiles.Count, (sw.Elapsed - t0).TotalMilliseconds);
+        _logger.LogInformation("[{Label}] Scan: {Count} archives found in {Ms}ms",
+            label, archiveFiles.Count, (sw.Elapsed - t0).TotalMilliseconds);
 
         if (archiveFiles.Count == 0)
+        {
+            ReportPhase(status, ct, "No comic archives found in the selected directory");
             return new List<ComicCoverResult>();
+        }
+
+        ReportPhase(status, ct, archiveFiles.Count == 1
+            ? "Found 1 archive"
+            : $"Found {archiveFiles.Count} archives");
 
         // 2. Encode the text query once
+        ReportPhase(status, ct, "Encoding query text...");
         t0 = sw.Elapsed;
-        var textQuery = $"a photo of {query}";
-        var queryEmbedding = await _textEncoder.EncodeTextAsync(textQuery, ct).ConfigureAwait(false);
-        _logger.LogInformation("[SearchAllPages] Text encoding: {Ms}ms", (sw.Elapsed - t0).TotalMilliseconds);
+        var queryEmbedding = await _textEncoder
+            .EncodeTextAsync($"a photo of {query}", ct).ConfigureAwait(false);
+        _logger.LogInformation("[{Label}] Text encoding: {Ms}ms", label, (sw.Elapsed - t0).TotalMilliseconds);
 
-        // 3. Get page counts for all archives
+        // 3. Process archives — one open handle per archive, progress = archive count
+        int total = archiveFiles.Count;
+        ReportPhase(status, ct, "Processing archives...");
+        ReportProgressTick(status, ct, 0, total);
         t0 = sw.Elapsed;
-        var archivePageCounts = new int[archiveFiles.Count];
-        int totalPages = 0;
-        await Parallel.ForEachAsync(
-            Enumerable.Range(0, archiveFiles.Count),
-            new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount, CancellationToken = ct },
-            async (i, token) =>
-            {
-                try
+
+        var results = new List<ComicCoverResult>();
+        var resultsLock = new object();
+
+        await RunArchivePipelineAsync(
+                archiveFiles,
+                allPages,
+                queryEmbedding,
+                r =>
                 {
-                    int count = await _archiveReader.GetImageCountAsync(archiveFiles[i]).ConfigureAwait(false);
-                    archivePageCounts[i] = count;
-                    Interlocked.Add(ref totalPages, count);
-                }
-                catch
-                {
-                    archivePageCounts[i] = 0;
-                }
-            }).ConfigureAwait(false);
+                    lock (resultsLock) results.Add(r);
+                },
+                (done, _) => ReportProgressTick(status, ct, done, total),
+                status,
+                ct)
+            .ConfigureAwait(false);
 
-        _logger.LogInformation("[SearchAllPages] Page count: {TotalPages} pages across {Archives} archives in {Ms}ms",
-            totalPages, archiveFiles.Count, (sw.Elapsed - t0).TotalMilliseconds);
+        _logger.LogInformation("[{Label}] Pipeline processed {Count} archive(s) in {Ms}ms",
+            label, total, (sw.Elapsed - t0).TotalMilliseconds);
 
-        if (totalPages == 0)
-            return new List<ComicCoverResult>();
+        // 4. Rank
+        ReportPhase(status, ct, "Scoring and ranking results...");
+        var output = results.OrderByDescending(x => x.SimilarityScore).ToList();
 
-        // 4. Build flat list of all (archiveIdx, pageIdx, cacheKey) entries
-        var allPages = new List<(int ArchiveIdx, int PageIdx, string CacheKey, DateTime LastModified, long FileSize)>();
-        var metaLookup = BuildMetaLookup(archiveFiles);
-
-        for (int i = 0; i < archiveFiles.Count; i++)
-        {
-            ct.ThrowIfCancellationRequested();
-
-            var path = archiveFiles[i];
-            metaLookup.TryGetValue(path, out var meta);
-
-            for (int p = 0; p < archivePageCounts[i]; p++)
-            {
-                allPages.Add((i, p, $"{path}|page={p}", meta.LastModified, meta.FileSize));
-            }
-        }
-
-        // 5. Batch-check cache for all pages
-        t0 = sw.Elapsed;
-        var cacheEntries = allPages
-            .Select(x => (x.CacheKey, x.LastModified, x.FileSize))
-            .ToList();
-        var cacheResults = await BatchGetCacheAsync(cacheEntries).ConfigureAwait(false);
-
-        // 6. Identify cache misses and process through producer/consumer pipeline
-        var misses = new List<(int OriginalIndex, string ArchivePath, int PageIndex, string CacheKey, DateTime LastModified, long FileSize)>();
-        var results = new (string ArchivePath, float[]? Embedding)[allPages.Count];
-
-        for (int i = 0; i < allPages.Count; i++)
-        {
-            var (archiveIdx, pageIdx, cacheKey, lm, fs) = allPages[i];
-            var archivePath = archiveFiles[archiveIdx];
-
-            cacheResults.TryGetValue(cacheKey, out var cached);
-            results[i] = (archivePath, cached);
-
-            if (cached is null)
-            {
-                misses.Add((i, archivePath, pageIdx, cacheKey, lm, fs));
-            }
-        }
-
-        int pageHits = allPages.Count - misses.Count;
-        _logger.LogInformation("[SearchAllPages] Cache check: {Hits}/{Total} page hits in {Ms}ms",
-            pageHits, allPages.Count, (sw.Elapsed - t0).TotalMilliseconds);
-
-        _logger.LogInformation("[SearchAllPages] Page misses: {Misses}, page hits: {Hits}",
-            misses.Count, pageHits);
-
-        _logger.LogInformation("[SearchAllPages] Reporting initial progress: {Current}/{Total}", pageHits, totalPages);
-        progress?.Report((pageHits, totalPages));
-
-        if (misses.Count > 0)
-        {
-            t0 = sw.Elapsed;
-            await RunProducerConsumerAsync(misses, results, totalPages, pageHits, progress, ct).ConfigureAwait(false);
-            _logger.LogInformation("[SearchAllPages] Producer/consumer pipeline completed in {Ms}ms",
-                (sw.Elapsed - t0).TotalMilliseconds);
-        }
-        else
-        {
-            _logger.LogInformation("[SearchAllPages] All pages were resolved from cache, extraction/inference skipped");
-        }
-
-        // 7. Score + sort
-        var output = new List<ComicCoverResult>(allPages.Count);
-        for (int i = 0; i < allPages.Count; i++)
-        {
-            var embedding = results[i].Embedding;
-            if (embedding is null) continue;
-
-            var (archiveIdx, pageIdx, _, _, _) = allPages[i];
-            var archivePath = archiveFiles[archiveIdx];
-
-            output.Add(new ComicCoverResult
-            {
-                ArchivePath = archivePath,
-                ArchiveFileName = Path.GetFileName(archivePath),
-                SimilarityScore = CosineSimilarity(embedding, queryEmbedding),
-                PageIndex = pageIdx,
-                PageCount = archivePageCounts[archiveIdx]
-            });
-        }
-
-        _logger.LogInformation("[SearchAllPages] Reporting final progress: {Current}/{Total}", totalPages, totalPages);
-        progress?.Report((totalPages, totalPages));
-        _logger.LogInformation("[SearchAllPages] Done: {Results} results, top score={TopScore:F4}, total={TotalMs}ms",
-            output.Count,
+        ReportProgressTick(status, ct, total, total);
+        _logger.LogInformation("[{Label}] Done: {Results} results, top score={TopScore:F4}, total={TotalMs}ms",
+            label, output.Count,
             output.Count > 0 ? output.Max(x => x.SimilarityScore) : 0f,
             sw.ElapsedMilliseconds);
 
-        return output.OrderByDescending(x => x.SimilarityScore).ToList();
+        return output;
+    }
+
+    /// <summary>
+    /// Producer/consumer pipeline over archives.
+    /// Producer (parallel, up to <see cref="ArchiveParallelism"/> archives at a time):
+    /// opens each archive once, enumerates its image entries, batch-checks the
+    /// embedding cache, extracts cache misses from the open handle and enqueues them.
+    /// Consumer: drains the bounded queue in GPU batches, saves embeddings and
+    /// reports results as soon as each batch is scored.
+    /// </summary>
+    private async Task RunArchivePipelineAsync(
+        List<string> archiveFiles,
+        bool allPages,
+        float[] queryEmbedding,
+        Action<ComicCoverResult> onResult,
+        Action<int, int> onArchiveProcessed,
+        IProgress<ComicSearchStatus>? status,
+        CancellationToken ct)
+    {
+        int queueCapacity = Math.Max(1, _batchEncoder.BatchSize * 2);
+        using var queue = new BlockingCollection<ImageWorkItem>(queueCapacity);
+
+        int processedArchives = 0;
+        int enqueued = 0;
+        int cacheHits = 0;
+        int cacheMisses = 0;
+        int failedExtractions = 0;
+        int flushedBatches = 0;
+
+        // Throttled (250 ms) reporter for high-frequency detail lines:
+        // per-archive completion and GPU-queue snapshots shown verbatim in the UI.
+        var detailStatus = new ThrottledStatusReporter(status, ct);
+
+        var producer = Task.Run(async () =>
+        {
+            try
+            {
+                await Parallel.ForEachAsync(
+                        archiveFiles,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = Math.Max(1, Math.Min(ArchiveParallelism, Environment.ProcessorCount)),
+                            CancellationToken = ct
+                        },
+                        async (path, token) =>
+                        {
+                            token.ThrowIfCancellationRequested();
+
+                            DateTime lastModified;
+                            long fileSize;
+                            try
+                            {
+                                var fi = new FileInfo(path);
+                                lastModified = fi.LastWriteTimeUtc;
+                                fileSize = fi.Length;
+                            }
+                            catch
+                            {
+                                lastModified = DateTime.MinValue;
+                                fileSize = 0;
+                            }
+
+                            using var session = await _archiveReader
+                                .OpenSessionAsync(path).ConfigureAwait(false);
+                            int pageCount = session.ImageEntries.Count;
+                            int pageEnd = allPages ? pageCount : 1; // covers mode: page 0 only
+
+                            if (pageCount == 0)
+                            {
+                                _logger.LogWarning(
+                                    "[Pipeline] No image entries — archive skipped: {Path}", path);
+                            }
+                            else
+                            {
+                                // Batch-check the embedding cache for this archive's pages
+                                var cacheEntries = new List<(string FilePath, DateTime LastModified, long FileSize)>(pageEnd);
+                                for (int p = 0; p < pageEnd; p++)
+                                    cacheEntries.Add((CacheKeyFor(path, p, allPages), lastModified, fileSize));
+
+                                var cached = await BatchGetCacheAsync(cacheEntries).ConfigureAwait(false);
+
+                                int archiveHits = 0;
+                                int archiveMisses = 0;
+
+                                for (int p = 0; p < pageEnd; p++)
+                                {
+                                    token.ThrowIfCancellationRequested();
+                                    string cacheKey = CacheKeyFor(path, p, allPages);
+
+                                    if (cached.TryGetValue(cacheKey, out var hit) && hit is not null)
+                                    {
+                                        archiveHits++;
+                                        Interlocked.Increment(ref cacheHits);
+                                        onResult(ToResult(path, p, pageCount, hit, queryEmbedding));
+                                        continue;
+                                    }
+
+                                    // Cache miss — extract from the already-open session handle
+                                    // (per-page misses are aggregated into the per-archive and
+                                    // final "Cache summary" log lines — no per-page log flood)
+                                    Interlocked.Increment(ref cacheMisses);
+                                    archiveMisses++;
+                                    byte[]? bytes = await session
+                                        .ExtractToMemoryAsync(p).ConfigureAwait(false);
+                                    if (bytes is null || bytes.Length == 0)
+                                    {
+                                        Interlocked.Increment(ref failedExtractions);
+                                        _logger.LogWarning(
+                                            "[Pipeline] Empty image bytes extracted: {Path} page {PageIndex}", path, p);
+                                        continue;
+                                    }
+
+                                    var workItem = new ImageWorkItem(path, p, pageCount, cacheKey, lastModified, fileSize, bytes);
+                                    // Blocking add: backpressure on the bounded queue, respects the token
+                                    queue.Add(workItem, token);
+                                    Interlocked.Increment(ref enqueued);
+                                }
+
+                                _logger.LogInformation(
+                                    "[Pipeline] {Name}: {Hits}/{Total} page(s) from cache{Misses}",
+                                    Path.GetFileName(path), archiveHits, pageEnd,
+                                    archiveMisses > 0 ? $", {archiveMisses} cache miss" : string.Empty);
+                            }
+
+                            int done = Interlocked.Increment(ref processedArchives);
+                            onArchiveProcessed(done, archiveFiles.Count);
+                            int batches = Volatile.Read(ref flushedBatches);
+                            detailStatus.Report(new ComicSearchStatus
+                            {
+                                Detail = FormatGpuDetail(done, archiveFiles.Count, batches, queue.Count),
+                                Current = done,
+                                Total = archiveFiles.Count,
+                                GpuBatchesDone = batches,
+                                GpuQueueDepth = queue.Count
+                            });
+                            _logger.LogInformation(
+                                "[Pipeline] Archive {Done}/{Total} processed: {Name} ({PageCount} pages)",
+                                done, archiveFiles.Count, Path.GetFileName(path), pageCount);
+                        }).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Always complete the queue so the consumer can drain and finish,
+                // even when the producer was cancelled or a body threw.
+                queue.CompleteAdding();
+            }
+        }, ct);
+
+        var batch = new List<ImageWorkItem>(_batchEncoder.BatchSize);
+
+        async Task FlushBatchAsync()
+        {
+            if (batch.Count == 0)
+                return;
+
+            int flushNumber = Interlocked.Increment(ref flushedBatches);
+            _logger.LogInformation("[Pipeline] Flushing batch #{BatchNumber} with {Count} images", flushNumber, batch.Count);
+
+            var payload = new List<(int Index, byte[] Data)>(batch.Count);
+            for (int i = 0; i < batch.Count; i++)
+                payload.Add((i, batch[i].ImageData));
+
+            var embeddings = await _batchEncoder
+                .EncodeImagesFromMemoryBatchAsync(payload, progress: null, ct)
+                .ConfigureAwait(false);
+
+            for (int i = 0; i < batch.Count; i++)
+            {
+                var work = batch[i];
+                var embedding = embeddings[i];
+                if (embedding is null)
+                    continue;
+
+                onResult(ToResult(work.ArchivePath, work.PageIndex, work.PageCount, embedding, queryEmbedding));
+
+                try
+                {
+                    await _store
+                        .SaveAsync(ModelName, work.CacheKey, work.LastModified, work.FileSize, embedding)
+                        .ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Best effort cache save
+                }
+            }
+
+            batch.Clear();
+        }
+
+        foreach (var item in queue.GetConsumingEnumerable(ct))
+        {
+            batch.Add(item);
+            if (batch.Count >= _batchEncoder.BatchSize)
+            {
+                await FlushBatchAsync().ConfigureAwait(false);
+                if (queue.Count == 0)
+                {
+                    // GPU caught up — no backlog in front of it
+                    int done = Volatile.Read(ref processedArchives);
+                    int batches = Volatile.Read(ref flushedBatches);
+                    detailStatus.Report(new ComicSearchStatus
+                    {
+                        Detail = FormatGpuDetail(done, archiveFiles.Count, batches, 0),
+                        Current = done,
+                        Total = archiveFiles.Count,
+                        GpuBatchesDone = batches,
+                        GpuQueueDepth = 0
+                    });
+                }
+            }
+        }
+
+        await FlushBatchAsync().ConfigureAwait(false);
+        await producer.ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "[Pipeline] Completed: archives={Archives}, enqueued={Enqueued}, cacheHits={Hits}, failedExtractions={Failed}, flushedBatches={Batches}",
+            archiveFiles.Count, enqueued, cacheHits, failedExtractions, flushedBatches);
+
+        // One-line answer to "is the cache working?" — a re-search of the same
+        // directory should show a hit rate near 100%.
+        int hits = Volatile.Read(ref cacheHits);
+        int misses = Volatile.Read(ref cacheMisses);
+        int pages = hits + misses;
+        _logger.LogInformation(
+            "[Pipeline] Cache summary: {Hits} hit(s), {Misses} miss(es){Rate} across {Archives} archive(s)",
+            hits, misses,
+            pages > 0 ? $" ({100.0 * hits / pages:F1}% hit rate)" : string.Empty,
+            archiveFiles.Count);
     }
 
     /// <inheritdoc />
     public async Task<byte[]?> ExtractCoverAsync(string archivePath)
     {
-        return await _archiveReader.ExtractImageToMemoryAsync(archivePath, 0)
-            .ConfigureAwait(false);
+        using var session = await _archiveReader.OpenSessionAsync(archivePath).ConfigureAwait(false);
+        return await session.ExtractToMemoryAsync(0).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -321,201 +428,24 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private async Task RunProducerConsumerAsync(
-        List<(int OriginalIndex, string ArchivePath, int PageIndex, string CacheKey, DateTime LastModified, long FileSize)> misses,
-        (string ArchivePath, float[]? Embedding)[] results,
-        int totalForProgress,
-        int initialDone,
-        IProgress<(int Current, int Total)>? progress,
-        CancellationToken ct)
+    /// <summary>
+    /// Embedding cache key — kept compatible with keys written by previous versions:
+    /// covers mode caches under the bare archive path, all-pages mode under "{path}|page={index}".
+    /// </summary>
+    private static string CacheKeyFor(string archivePath, int pageIndex, bool allPages)
+        => allPages ? $"{archivePath}|page={pageIndex}" : archivePath;
+
+    private static ComicCoverResult ToResult(
+        string archivePath, int pageIndex, int pageCount, float[] embedding, float[] queryEmbedding)
     {
-        int queueCapacity = Math.Max(1, _batchEncoder.BatchSize * 2);
-        using var queue = new BlockingCollection<ImageWorkItem>(queueCapacity);
-
-        int totalMisses = misses.Count;
-        int processed = 0;
-        int extractedFailed = 0;
-        int enqueued = 0;
-        int dequeued = 0;
-        int batchesFlushed = 0;
-
-        _logger.LogInformation(
-            "[Pipeline] Start: misses={Misses}, queueCapacity={Capacity}, batchSize={BatchSize}, progressTotal={ProgressTotal}, initialDone={InitialDone}, hasProgressReporter={HasProgress}",
-            totalMisses, queueCapacity, _batchEncoder.BatchSize, totalForProgress, initialDone, progress is not null);
-
-        void ReportProgressIncrement()
+        return new ComicCoverResult
         {
-            int current = Interlocked.Increment(ref processed);
-
-            if (totalForProgress > 0)
-            {
-                int currentForUi = Math.Min(initialDone + current, totalForProgress);
-                _logger.LogDebug("[Pipeline] progress.Report({Current}/{Total})", currentForUi, totalForProgress);
-                progress?.Report((currentForUi, totalForProgress));
-            }
-
-            if (current == 1 || current == totalMisses || current % 25 == 0)
-            {
-                _logger.LogInformation(
-                    "[Pipeline] Progress: processed={Processed}/{Misses}, enqueued={Enqueued}, dequeued={Dequeued}, failedExtractions={Failed}",
-                    current, totalMisses, Volatile.Read(ref enqueued), Volatile.Read(ref dequeued), Volatile.Read(ref extractedFailed));
-            }
-        }
-
-        var producer = Task.Run(async () =>
-        {
-            try
-            {
-                foreach (var miss in misses)
-                {
-                    ct.ThrowIfCancellationRequested();
-
-                    try
-                    {
-                        var bytes = await _archiveReader
-                            .ExtractImageToMemoryAsync(miss.ArchivePath, miss.PageIndex)
-                            .ConfigureAwait(false);
-
-                        if (bytes is null || bytes.Length == 0)
-                        {
-                            Interlocked.Increment(ref extractedFailed);
-                            _logger.LogWarning("[Pipeline] Empty image bytes extracted: {Path} page {PageIndex}",
-                                miss.ArchivePath, miss.PageIndex);
-                            results[miss.OriginalIndex] = (miss.ArchivePath, null);
-                            ReportProgressIncrement();
-                            continue;
-                        }
-
-                        var workItem = new ImageWorkItem(
-                            miss.OriginalIndex,
-                            miss.ArchivePath,
-                            miss.PageIndex,
-                            miss.CacheKey,
-                            miss.LastModified,
-                            miss.FileSize,
-                            bytes);
-
-                        queue.Add(workItem, ct);
-                        Interlocked.Increment(ref enqueued);
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        Interlocked.Increment(ref extractedFailed);
-                        _logger.LogWarning(ex, "Image extraction failed: {Path} page {PageIndex}",
-                            miss.ArchivePath, miss.PageIndex);
-                        results[miss.OriginalIndex] = (miss.ArchivePath, null);
-                        ReportProgressIncrement();
-                    }
-                }
-            }
-            finally
-            {
-                queue.CompleteAdding();
-                _logger.LogInformation("[Pipeline] Producer completed: enqueued={Enqueued}, failedExtractions={Failed}",
-                    Volatile.Read(ref enqueued), Volatile.Read(ref extractedFailed));
-            }
-        }, ct);
-
-        var batch = new List<ImageWorkItem>(_batchEncoder.BatchSize);
-
-        async Task FlushBatchAsync()
-        {
-            if (batch.Count == 0)
-                return;
-
-            List<(int OriginalIndex, byte[] Data)> payload = batch
-                .Select(w => (w.OriginalIndex, w.ImageData))
-                .ToList();
-
-            int flushNumber = Interlocked.Increment(ref batchesFlushed);
-            _logger.LogInformation("[Pipeline] Flushing batch #{BatchNumber} with {Count} images", flushNumber, batch.Count);
-
-            var embeddings = await _batchEncoder
-                .EncodeImagesFromMemoryBatchAsync(payload, progress: null, ct)
-                .ConfigureAwait(false);
-
-            for (int i = 0; i < batch.Count; i++)
-            {
-                var work = batch[i];
-                var embedding = embeddings[i];
-
-                results[work.OriginalIndex] = (work.ArchivePath, embedding);
-
-                try
-                {
-                    await _store
-                        .SaveAsync(ModelName, work.CacheKey, work.LastModified, work.FileSize, embedding)
-                        .ConfigureAwait(false);
-                }
-                catch
-                {
-                    // Best effort cache save
-                }
-
-                ReportProgressIncrement();
-            }
-
-            batch.Clear();
-        }
-
-        foreach (var item in queue.GetConsumingEnumerable(ct))
-        {
-            ct.ThrowIfCancellationRequested();
-
-            batch.Add(item);
-            Interlocked.Increment(ref dequeued);
-            if (batch.Count >= _batchEncoder.BatchSize)
-            {
-                await FlushBatchAsync().ConfigureAwait(false);
-            }
-        }
-
-        await FlushBatchAsync().ConfigureAwait(false);
-        await producer.ConfigureAwait(false);
-
-        _logger.LogInformation(
-            "[Pipeline] Completed: misses={Misses}, processed={Processed}, enqueued={Enqueued}, dequeued={Dequeued}, failedExtractions={Failed}, flushedBatches={Batches}",
-            totalMisses, processed, enqueued, dequeued, extractedFailed, batchesFlushed);
-    }
-
-    private List<(string FilePath, DateTime LastModified, long FileSize)> BuildMetaEntries(List<string> paths)
-    {
-        var entries = new List<(string FilePath, DateTime LastModified, long FileSize)>(paths.Count);
-        foreach (var path in paths)
-        {
-            try
-            {
-                var fi = new FileInfo(path);
-                entries.Add((path, fi.LastWriteTimeUtc, fi.Length));
-            }
-            catch
-            {
-                entries.Add((path, DateTime.MinValue, 0));
-            }
-        }
-        return entries;
-    }
-
-    private Dictionary<string, (DateTime LastModified, long FileSize)> BuildMetaLookup(List<string> paths)
-    {
-        var lookup = new Dictionary<string, (DateTime LastModified, long FileSize)>(paths.Count);
-        foreach (var path in paths)
-        {
-            try
-            {
-                var fi = new FileInfo(path);
-                lookup[path] = (fi.LastWriteTimeUtc, fi.Length);
-            }
-            catch
-            {
-                lookup[path] = (DateTime.MinValue, 0);
-            }
-        }
-        return lookup;
+            ArchivePath = archivePath,
+            ArchiveFileName = Path.GetFileName(archivePath),
+            SimilarityScore = CosineSimilarity(embedding, queryEmbedding),
+            PageIndex = pageIndex,
+            PageCount = pageCount
+        };
     }
 
     private async Task<Dictionary<string, float[]?>> BatchGetCacheAsync(
@@ -528,6 +458,52 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         catch
         {
             return new Dictionary<string, float[]?>();
+        }
+    }
+
+    /// <summary>
+    /// Builds the full status line (shown verbatim by the UI — no trailing "...")
+    /// with the archive counter and the GPU-side pipeline state:
+    /// "Processing archives: 3/142 · GPU 12 batches · queue 45".
+    /// </summary>
+    private static string FormatGpuDetail(int doneArchives, int totalArchives, int flushedBatches, int queueDepth)
+        => $"Processing archives: {doneArchives}/{totalArchives} · GPU {flushedBatches} batches · queue {queueDepth}";
+
+    /// <summary>
+    /// Cancellation-safe status reporter with a minimum 250 ms interval between reports —
+    /// used for high-frequency detail lines (archive completions, queue snapshots) so a
+    /// burst of archive events can't flood the UI thread. Coarse phase transitions are
+    /// reported separately and stay immediate.
+    /// </summary>
+    private sealed class ThrottledStatusReporter
+    {
+        private static readonly long MinIntervalTicks = 250 * TimeSpan.TicksPerMillisecond;
+
+        private readonly IProgress<ComicSearchStatus>? _status;
+        private readonly CancellationToken _ct;
+        private long _lastReportTicks; // 0 = never reported (tick counts are positive)
+
+        public ThrottledStatusReporter(IProgress<ComicSearchStatus>? status, CancellationToken ct)
+        {
+            _status = status;
+            _ct = ct;
+        }
+
+        public void Report(ComicSearchStatus update)
+        {
+            if (_status is null || _ct.IsCancellationRequested)
+                return;
+
+            long now = DateTime.UtcNow.Ticks;
+            long last = Interlocked.Read(ref _lastReportTicks);
+            if (now - last < MinIntervalTicks)
+                return;
+
+            // Only one caller wins the slot; losers skip this tick
+            if (Interlocked.CompareExchange(ref _lastReportTicks, now, last) != last)
+                return;
+
+            _status.Report(update);
         }
     }
 
@@ -567,9 +543,9 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     }
 
     private readonly record struct ImageWorkItem(
-        int OriginalIndex,
         string ArchivePath,
         int PageIndex,
+        int PageCount,
         string CacheKey,
         DateTime LastModified,
         long FileSize,

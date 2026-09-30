@@ -25,7 +25,7 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox Grid.Column="0" Text="{Binding TrainingDirectory, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="True" Margin="0,0,8,0"/>
+                    <TextBox Grid.Column="0" Text="{Binding TrainingDirectory, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0"/>
                     <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseTrainingDirectoryCommand}" Padding="12,4"/>
                 </Grid>
 
@@ -35,7 +35,7 @@
                         <ColumnDefinition Width="*"/>
                         <ColumnDefinition Width="Auto"/>
                     </Grid.ColumnDefinitions>
-                    <TextBox Grid.Column="0" Text="{Binding SaveModelPath, UpdateSourceTrigger=PropertyChanged}" IsReadOnly="True" Margin="0,0,8,0"/>
+                    <TextBox Grid.Column="0" Text="{Binding SaveModelPath, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,8,0"/>
                     <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseSavePathCommand}" Padding="12,4"/>
                 </Grid>
 

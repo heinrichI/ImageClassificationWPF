@@ -26,6 +26,16 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     private CancellationTokenSource? _copyCts;
     private SearchMode _lastSearchMode = SearchMode.CoversOnly;
     private DateTime _lastProgressUiUpdateUtc = DateTime.MinValue;
+    private string _currentPhase = string.Empty;
+    private bool _showingDetail;
+
+    /// <summary>
+    /// Generation stamp for UI updates. Every progress/status callback captures the
+    /// run id it belongs to and is dropped if the run has ended (finished, failed or
+    /// cancelled) or a new run started — otherwise late dispatcher callbacks would
+    /// overwrite "Search cancelled." with a stale phase/counter.
+    /// </summary>
+    private int _uiUpdateRunId;
 
     public ComicCoverSearchViewModel(IComicCoverSearchService searchService, ILogger<ComicCoverSearchViewModel> logger,
         ThumbnailProvider thumbnailProvider, ImageCopyService copyService)
@@ -66,9 +76,9 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     partial void OnProgressCurrentChanged(int value)
     {
         OnPropertyChanged(nameof(ProgressPercent));
-        _logger.LogDebug(
-            "VM ProgressCurrent changed: {Current}, ProgressTotal={Total}, Percent={Percent:F2}, IsBusy={IsBusy}",
-            value, ProgressTotal, ProgressPercent, IsBusy);
+        //_logger.LogDebug(
+        //    "VM ProgressCurrent changed: {Current}, ProgressTotal={Total}, Percent={Percent:F2}, IsBusy={IsBusy}",
+        //    value, ProgressTotal, ProgressPercent, IsBusy);
     }
 
     [ObservableProperty]
@@ -91,6 +101,18 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     public float ProgressPercent => ProgressTotal > 0
         ? (ProgressCurrent / (float)ProgressTotal) * 100f
         : 0f;
+
+    /// <summary>
+    /// Rebuilds the status line from the current phase and (if known) the progress counter:
+    /// "Processing archives...: 48/142", or just the phase while the total is unknown.
+    /// (Full detail lines bypass this method — they are applied verbatim.)
+    /// </summary>
+    private void RefreshStatusMessage()
+    {
+        StatusMessage = ProgressTotal > 0
+            ? $"{_currentPhase}: {ProgressCurrent}/{ProgressTotal}"
+            : _currentPhase;
+    }
 
     public ObservableCollection<ComicCoverItem> Results { get; } = new();
 
@@ -132,6 +154,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         }
 
         _lastProgressUiUpdateUtc = DateTime.MinValue;
+        _showingDetail = false;
         _logger.LogInformation("SearchAsync started. ModeIndex={ModeIndex}, Directory='{Directory}', QueryLength={QueryLength}",
             SelectedModeIndex, DirectoryPath, QueryText?.Length ?? 0);
 
@@ -142,6 +165,12 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             return;
         }
 
+        if (!System.IO.Directory.Exists(DirectoryPath))
+        {
+            StatusMessage = $"Directory not found: {DirectoryPath}";
+            return;
+        }
+
         if (string.IsNullOrWhiteSpace(QueryText))
         {
             StatusMessage = "Please enter a search query (e.g. 'beach', 'summer').";
@@ -149,7 +178,9 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         }
 
         IsBusy = true;
-        StatusMessage = "Searching...";
+        int runId = Interlocked.Increment(ref _uiUpdateRunId);
+        _currentPhase = "Preparing search...";
+        StatusMessage = "Preparing search...";
         _thumbnailProvider.Clear();
         Results.Clear();
         ProgressCurrent = 0;
@@ -160,30 +191,59 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         var dispatcher = System.Windows.Application.Current?.Dispatcher;
         var currentMode = CurrentMode;
 
-        // Build the progress reporter while still on the UI thread.
-        var progress = new Progress<(int Current, int Total)>(p =>
+        // Unified status channel: phase markers, preformatted detail lines (per-archive /
+        // GPU-queue snapshots) and progress-bar ticks all arrive as ComicSearchStatus.
+        // Phase changes and detail lines are applied immediately; plain counter ticks
+        // update the bar freely, but the status-line refresh is rate-limited to 250 ms
+        // so a burst of archive events can't flood the UI thread.
+        var status = new Progress<ComicSearchStatus>(s =>
         {
-            //_logger.LogInformation("Progress callback received: {Current}/{Total}, IsBusy={IsBusy}, ThreadId={ThreadId}",
-            //    p.Current, p.Total, IsBusy, Environment.CurrentManagedThreadId);
-
             void ApplyUpdate()
             {
-                ProgressTotal   = p.Total;
-                ProgressCurrent = p.Current;
+                if (runId != Volatile.Read(ref _uiUpdateRunId)) return; // stale run
+
+                if (s.Detail is not null)
+                {
+                    // Full detail line — shown verbatim until the next phase/detail update
+                    if (s.Current is int current) ProgressCurrent = current;
+                    if (s.Total is int total) ProgressTotal = total;
+                    _showingDetail = true;
+                    StatusMessage = s.Detail;
+                    _logger.LogDebug("StatusMessage set: '{StatusMessage}'",
+                        StatusMessage);
+                    return;
+                }
+
+                if (!string.IsNullOrEmpty(s.Phase))
+                {
+                    // Phase marker — applied immediately; resets the counter-tick throttle
+                    // so the next tick refreshes the line without delay
+                    _showingDetail = false;
+                    _currentPhase = s.Phase;
+                    _lastProgressUiUpdateUtc = DateTime.MinValue;
+                    RefreshStatusMessage();
+                    _logger.LogDebug("Status phase: '{Phase}' ({Current}/{Total})",
+                        s.Phase, ProgressCurrent, ProgressTotal);
+                    return;
+                }
+
+                // Plain counter tick — bar updates freely, status-line refresh is throttled
+                if (s.Current is int c) ProgressCurrent = c;
+                if (s.Total is int t) ProgressTotal = t;
+                if (_showingDetail) return; // keep the latest detail line on screen
 
                 var now = DateTime.UtcNow;
                 if (_lastProgressUiUpdateUtc == DateTime.MinValue || (now - _lastProgressUiUpdateUtc).TotalMilliseconds >= 250)
                 {
-                    var modeText = currentMode == SearchMode.AllPages ? "pages" : "covers";
-                    StatusMessage = $"Processing {modeText}: {p.Current}/{p.Total}";
-                    _logger.LogInformation("StatusMessage set: '{StatusMessage}', Current={Current}, Total={Total}",
-                        StatusMessage, p.Current, p.Total);
+                    RefreshStatusMessage();
+                    _logger.LogDebug("StatusMessage set: '{StatusMessage}'",
+                        StatusMessage);
                     _lastProgressUiUpdateUtc = now;
                 }
             }
 
             // Always marshal to UI thread — defend against callers that invoke
-            // progress.Report from a thread-pool thread bypassing SynchronizationContext.
+            // status.Report from a thread-pool thread bypassing SynchronizationContext.
             if (dispatcher != null && !dispatcher.CheckAccess())
                 dispatcher.BeginInvoke(ApplyUpdate);
             else
@@ -200,6 +260,8 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             // Clear cache if mode changed since last search
             if (_lastSearchMode != currentMode)
             {
+                _currentPhase = "Mode changed — clearing vector cache...";
+                StatusMessage = "Mode changed — clearing vector cache...";
                 await _searchService.ClearCacheAsync();
                 _lastSearchMode = currentMode;
             }
@@ -210,9 +272,9 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             List<ComicCoverResult> results = await Task.Run(async () =>
             {
                 if (currentMode == SearchMode.AllPages)
-                    return await _searchService.SearchAllPagesAsync(DirectoryPath, QueryText, progress, ct).ConfigureAwait(false);
+                    return await _searchService.SearchAllPagesAsync(DirectoryPath, QueryText, status, ct).ConfigureAwait(false);
                 else
-                    return await _searchService.SearchAsync(DirectoryPath, QueryText, progress, ct).ConfigureAwait(false);
+                    return await _searchService.SearchAsync(DirectoryPath, QueryText, status, ct).ConfigureAwait(false);
             }, ct);
 
             // Filter by similarity threshold
@@ -245,9 +307,17 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
                     $"scores: {filtered.Min(r => r.SimilarityScore):P1}–{filtered.Max(r => r.SimilarityScore):P1}, " +
                     $"median: {filtered.OrderBy(r => r.SimilarityScore).ElementAt(filtered.Count / 2).SimilarityScore:P1})";
             }
+            else if (results.Count == 0)
+            {
+                // No results at all — keep the service's final phase if it explains why
+                // (e.g. "No comic archives found in the selected directory").
+                StatusMessage = string.IsNullOrWhiteSpace(_currentPhase)
+                    ? "No matching results found."
+                    : _currentPhase;
+            }
             else
             {
-                StatusMessage = "No matching results found.";
+                StatusMessage = "No results above the similarity threshold.";
             }
         }
         catch (OperationCanceledException)
@@ -261,6 +331,8 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         }
         finally
         {
+            // Invalidate late progress/status callbacks from this run
+            Interlocked.Increment(ref _uiUpdateRunId);
             IsBusy = false;
         }
     }
@@ -348,6 +420,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         }
 
         IsBusy = true;
+        int copyRunId = Interlocked.Increment(ref _uiUpdateRunId);
         StatusMessage = "Copying images...";
         ProgressCurrent = 0;
         ProgressTotal = items.Count;
@@ -357,6 +430,8 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         {
             void ApplyUpdate()
             {
+                if (copyRunId != Volatile.Read(ref _uiUpdateRunId)) return; // stale run
+
                 ProgressCurrent = p;
                 StatusMessage = $"Copying images: {p}/{items.Count}";
             }
@@ -398,6 +473,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         finally
         {
             _copyCts = null;
+            Interlocked.Increment(ref _uiUpdateRunId);
             IsBusy = false;
         }
     }
