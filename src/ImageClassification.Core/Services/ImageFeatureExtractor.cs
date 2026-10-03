@@ -15,6 +15,7 @@ namespace ImageClassification.Core.Services;
 internal sealed class ImageFeatureExtractor : IImageFeatureExtractor
 {
     private readonly IModelDownloader _downloader;
+    private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
     private InferenceSession? _session;
     private int _imageSize = 224;
     private string _featureOutputName = string.Empty;
@@ -22,9 +23,10 @@ internal sealed class ImageFeatureExtractor : IImageFeatureExtractor
     private Task? _initTask;
     private readonly object _initLock = new();
 
-    public ImageFeatureExtractor(IModelDownloader downloader)
+    public ImageFeatureExtractor(IModelDownloader downloader, IOnnxRuntimeOptions onnxRuntimeOptions)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
     }
 
     private Task EnsureInitializedAsync()
@@ -51,10 +53,10 @@ internal sealed class ImageFeatureExtractor : IImageFeatureExtractor
 
         var sessionOptions = new SessionOptions
         {
-            InterOpNumThreads = 4,
-            IntraOpNumThreads = 4,
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
 
         _session = new InferenceSession(modelPath, sessionOptions);
         _imageSize = imageSize;

@@ -1,0 +1,57 @@
+<Window x:Class="ImageClassification.UI.Views.VectorCacheInfoWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Vector Cache — Info"
+        Width="640" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <StackPanel Margin="16">
+        <TextBlock x:Name="PathText" FontFamily="Consolas" TextWrapping="Wrap" />
+        <Separator Margin="8,0" />
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="180" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+                <RowDefinition />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="Database file size" Foreground="Gray" />
+            <TextBlock Grid.Row="0" Grid.Column="1" x:Name="DbSizeText" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="WAL file size" Foreground="Gray" />
+            <TextBlock Grid.Row="1" Grid.Column="1" x:Name="WalSizeText" />
+
+            <TextBlock Grid.Row="2" Grid.Column="0" Text="Total cached entries" Foreground="Gray" />
+            <TextBlock Grid.Row="2" Grid.Column="1" x:Name="TotalText" />
+
+            <TextBlock Grid.Row="3" Grid.Column="0" Text="— Covers (one per archive)" Foreground="Gray" />
+            <TextBlock Grid.Row="3" Grid.Column="1" x:Name="CoversText" />
+
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="— All pages (per archive page)" Foreground="Gray" />
+            <TextBlock Grid.Row="4" Grid.Column="1" x:Name="AllPagesText" />
+
+            <TextBlock Grid.Row="5" Grid.Column="0" Text="Models" Foreground="Gray" />
+            <TextBlock Grid.Row="5" Grid.Column="1" x:Name="ModelsText" />
+
+            <TextBlock Grid.Row="6" Grid.Column="0" Text="Oldest entry (UTC)" Foreground="Gray" />
+            <TextBlock Grid.Row="6" Grid.Column="1" x:Name="OldestText" />
+
+            <TextBlock Grid.Row="7" Grid.Column="0" Text="Newest entry (UTC)" Foreground="Gray" />
+            <TextBlock Grid.Row="7" Grid.Column="1" x:Name="NewestText" />
+        </Grid>
+        <Separator Margin="8,0" />
+        <TextBlock x:Name="HintText" TextWrapping="Wrap" Foreground="Gray"
+                   Text="Entries are invalidated automatically when an archive file changes (last-modified time or size). Use Optimize to fold the WAL file into the database; use Vacuum (rarely) to reclaim unused space." />
+        <Button Content="Close" Width="90" HorizontalAlignment="Right" Margin="0,12,0,0"
+                IsCancel="True" Click="Close_Click" />
+    </StackPanel>
+</Window>

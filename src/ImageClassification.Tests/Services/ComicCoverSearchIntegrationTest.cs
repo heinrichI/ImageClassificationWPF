@@ -1,4 +1,5 @@
 using ImageClassification.Core.Services;
+using ImageClassification.Tests;
 using ImageClassification.VectorStore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -25,12 +26,13 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         _archiveReader = new ImageClassification.ArchiveReader.ArchiveReader();
         _logger = NullLogger<ComicCoverSearchService>.Instance;
         _downloader = new ModelDownloader();
-        _clipTextEncoder = new ClipTextEncoder(_downloader, NullLogger<BatchImageEncoder>.Instance);
+        _clipTextEncoder = new ClipTextEncoder(_downloader, NullLogger<BatchImageEncoder>.Instance, new FakeOnnxRuntimeOptions());
         _vectorStore = new SqliteVectorStore();
         _batchEncoder = new BatchImageEncoder(
             _downloader,
-            new BatchImageEncoderSettings { BatchSize = 32 },
-            NullLogger<BatchImageEncoder>.Instance);
+            new FakeGpuPipelineOptions { BatchSize = 32 },
+            NullLogger<BatchImageEncoder>.Instance,
+            new FakeOnnxRuntimeOptions());
     }
 
     [Fact(Skip = "Integration test — requires real CLIP ONNX model, BPE vocabulary, and .cbr file")]

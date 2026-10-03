@@ -2,11 +2,14 @@ using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Media.Imaging;
+using System.Windows.Shell;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
 using ImageClassification.UI.Services;
+using ImageClassification.UI.Views;
 using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 
@@ -19,12 +22,12 @@ namespace ImageClassification.UI.ViewModels;
 public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvider
 {
     private readonly IComicCoverSearchService _searchService;
+    private readonly IVectorStore _vectorStore;
     private readonly ILogger<ComicCoverSearchViewModel> _logger;
     private readonly ThumbnailProvider _thumbnailProvider;
     private readonly ImageCopyService _copyService;
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _copyCts;
-    private SearchMode _lastSearchMode = SearchMode.CoversOnly;
     private DateTime _lastProgressUiUpdateUtc = DateTime.MinValue;
     private string _currentPhase = string.Empty;
     private bool _showingDetail;
@@ -37,10 +40,12 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     /// </summary>
     private int _uiUpdateRunId;
 
-    public ComicCoverSearchViewModel(IComicCoverSearchService searchService, ILogger<ComicCoverSearchViewModel> logger,
+    public ComicCoverSearchViewModel(IComicCoverSearchService searchService, IVectorStore vectorStore,
+        ILogger<ComicCoverSearchViewModel> logger,
         ThumbnailProvider thumbnailProvider, ImageCopyService copyService)
     {
         _searchService = searchService ?? throw new ArgumentNullException(nameof(searchService));
+        _vectorStore = vectorStore ?? throw new ArgumentNullException(nameof(vectorStore));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _thumbnailProvider = thumbnailProvider;
         _copyService = copyService ?? throw new ArgumentNullException(nameof(copyService));
@@ -102,6 +107,34 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         ? (ProgressCurrent / (float)ProgressTotal) * 100f
         : 0f;
 
+    // ── Windows taskbar progress (both ProgressState and ProgressValue are dependency
+    //    properties on TaskbarItemInfo and are bound in MainWindow.xaml) ──
+
+    [ObservableProperty]
+    private double _taskbarProgressValue;
+
+    [ObservableProperty]
+    private TaskbarItemProgressState _taskbarProgressState = TaskbarItemProgressState.None;
+
+    /// <summary>
+    /// Mirrors search progress on the Windows taskbar button: determinate bar while the archive
+    /// total is known, animated stripes while it is not (model download / directory scan),
+    /// hidden when idle. Called on every status update (already throttled) and on start/stop.
+    /// Note: TaskbarItemInfo.ProgressValue is coerced by WPF to the range 0.0–1.0.
+    /// </summary>
+    private void UpdateTaskbar()
+    {
+        TaskbarProgressState = !IsBusy
+            ? TaskbarItemProgressState.None
+            : ProgressTotal > 0
+                ? TaskbarItemProgressState.Normal
+                : TaskbarItemProgressState.Indeterminate;
+
+        TaskbarProgressValue = IsBusy && ProgressTotal > 0
+            ? ProgressCurrent / (double)ProgressTotal   // 0.0–1.0, coerced by WPF
+            : 0;
+    }
+
     /// <summary>
     /// Rebuilds the status line from the current phase and (if known) the progress counter:
     /// "Processing archives...: 48/142", or just the phase while the total is unknown.
@@ -116,11 +149,35 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
 
     public ObservableCollection<ComicCoverItem> Results { get; } = new();
 
+    /// <summary>
+    /// Archive diagnostics collected during the current search (container mismatches such as
+    /// "ZIP inside .cbr", bulk-pass fallbacks). Accumulated in a visible UI list; cleared
+    /// on search start. Capped so a pathological library cannot grow it unboundedly.
+    /// </summary>
+    public ObservableCollection<string> ArchiveNotes { get; } = new();
+
+    private const int MaxArchiveNotes = 500;
+
+    /// <summary>Item count of <see cref="ArchiveNotes"/> (drives the notes panel visibility).</summary>
+    public int ArchiveNotesCount { get; private set; }
+
     public ObservableCollection<string> SearchModes { get; }
 
     /// <inheritdoc />
     public IReadOnlyList<TabMenuItem> MenuItems =>
-        new[] { new TabMenuItem("Copy results images...", CopyResultsImagesCommand) };
+        new[]
+        {
+            new TabMenuItem("Copy", Children:
+            [
+                new TabMenuItem("Copy results images...", CopyResultsImagesCommand)
+            ]),
+            new TabMenuItem("DB", Children:
+            [
+                new TabMenuItem("Vector cache: Info...", VectorCacheInfoCommand),
+                new TabMenuItem("Vector cache: Optimize", VectorCacheOptimizeCommand),
+                new TabMenuItem("Vector cache: Vacuum...", VectorCacheVacuumCommand)
+            ])
+        };
 
 
     /// <summary>
@@ -181,8 +238,11 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         int runId = Interlocked.Increment(ref _uiUpdateRunId);
         _currentPhase = "Preparing search...";
         StatusMessage = "Preparing search...";
+        UpdateTaskbar();
         _thumbnailProvider.Clear();
         Results.Clear();
+        ArchiveNotes.Clear();
+        ArchiveNotesCount = 0;
         ProgressCurrent = 0;
         ProgressTotal = 0;
 
@@ -201,6 +261,19 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             void ApplyUpdate()
             {
                 if (runId != Volatile.Read(ref _uiUpdateRunId)) return; // stale run
+
+                // Archive diagnostics (rare per-search events) — accumulate in the notes list.
+                if (s.Note is not null)
+                {
+                    ArchiveNotes.Add(s.Note);
+                    if (ArchiveNotes.Count > MaxArchiveNotes)
+                        ArchiveNotes.RemoveAt(0);
+                    ArchiveNotesCount = ArchiveNotes.Count;
+                    OnPropertyChanged(nameof(ArchiveNotesCount));
+                }
+
+                // Refresh the taskbar button on every status event (cheap: two property writes)
+                UpdateTaskbar();
 
                 if (s.Detail is not null)
                 {
@@ -257,14 +330,11 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             _cts = new CancellationTokenSource();
             var ct = _cts.Token;
 
-            // Clear cache if mode changed since last search
-            if (_lastSearchMode != currentMode)
-            {
-                _currentPhase = "Mode changed — clearing vector cache...";
-                StatusMessage = "Mode changed — clearing vector cache...";
-                await _searchService.ClearCacheAsync();
-                _lastSearchMode = currentMode;
-            }
+            // No cache clearing on mode change: covers and all-pages keys are
+            // disjoint ("{path}" vs "{path}|page=N"), and entry freshness is already
+            // validated via LastWriteTimeUtc/Size in the vector store. (The previous
+            // auto-clear here wiped the whole cache after every app restart in
+            // AllPages mode, forcing full re-encoding on each launch.)
 
             // Run on thread-pool so the UI thread is never blocked by IO or CPU work
             // (ScanArchivesRecursive, text-encoder init, GPU inference all happen off UI).
@@ -334,10 +404,55 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             // Invalidate late progress/status callbacks from this run
             Interlocked.Increment(ref _uiUpdateRunId);
             IsBusy = false;
+            UpdateTaskbar();
         }
     }
 
     private bool CanSearch() => !IsBusy;
+
+    // ─────────────────────── Vector cache menu commands ───────────────────────
+
+    [RelayCommand]
+    private async Task VectorCacheInfoAsync()
+    {
+        VectorCacheInfo info;
+        try
+        {
+            info = await _vectorStore.GetCacheInfoAsync();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Failed to read cache info: {ex.Message}",
+                "Vector Cache", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        var window = new VectorCacheInfoWindow(info);
+        window.Owner = Application.Current.MainWindow;
+        window.ShowDialog();
+    }
+
+    [RelayCommand]
+    private async Task VectorCacheOptimizeAsync()
+    {
+        var result = await _vectorStore.OptimizeAsync();
+        MessageBox.Show(result.Detail, "Vector Cache — Optimize", MessageBoxButton.OK,
+            result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+    }
+
+    [RelayCommand]
+    private async Task VectorCacheVacuumAsync()
+    {
+        var confirm = MessageBox.Show(
+            "Vacuum rebuilds the database file from scratch and locks the store for the whole " +
+            "operation (can take a while for large caches). Continue?",
+            "Vector Cache — Vacuum", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        var result = await _vectorStore.VacuumAsync();
+        MessageBox.Show(result.Detail, "Vector Cache — Vacuum", MessageBoxButton.OK,
+            result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+    }
 
     partial void OnIsBusyChanged(bool value)
     {

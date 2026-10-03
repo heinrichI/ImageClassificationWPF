@@ -1,6 +1,7 @@
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
+using ImageClassification.Tests;
 using Microsoft.Extensions.Logging;
 using Moq;
 
@@ -24,8 +25,9 @@ public class ComicCoverSearchServiceTests
         _mockDownloader.Setup(d => d.GetModelPath(It.IsAny<string>())).Returns("dummy.onnx");
         _batchEncoder = new BatchImageEncoder(
             _mockDownloader.Object,
-            new BatchImageEncoderSettings { BatchSize = 32 },
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<BatchImageEncoder>.Instance);
+            new FakeGpuPipelineOptions { BatchSize = 32 },
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<BatchImageEncoder>.Instance,
+            new FakeOnnxRuntimeOptions());
     }
 
     [Fact]
@@ -334,13 +336,158 @@ public class ComicCoverSearchServiceTests
         // exactly ONCE and every page extracted from that open session.
         _mockArchiveReader
             .Setup(r => r.OpenSessionAsync(comicPath))
-            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null)));
+            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null)).Object);
 
         try
         {
             await service.SearchAllPagesAsync(searchDir, "test");
 
             _mockArchiveReader.Verify(r => r.OpenSessionAsync(comicPath), Times.Once);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesAsync_ColdArchive_UsesBulkExtraction()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var comicPath = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(comicPath, []);
+
+        var service = CreateService();
+        var session = CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null));
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+        // Default vector store returns null for every key — every page is a cache miss
+
+        try
+        {
+            await service.SearchAllPagesAsync(searchDir, "test");
+
+            // More than half of the pages are misses → one bulk pass, no per-page extraction
+            session.Verify(s => s.ExtractAllToMemoryAsync(), Times.Once);
+            session.Verify(s => s.ExtractToMemoryAsync(It.IsAny<int>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesAsync_WarmArchive_SkipsBulkExtraction()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var comicPath = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(comicPath, []);
+
+        var service = CreateService();
+        var session = CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null));
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+
+        // Both pages are in the embedding cache — nothing must be extracted at all
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = CreateEmbedding(1f);
+                return result;
+            });
+
+        try
+        {
+            var results = await service.SearchAllPagesAsync(searchDir, "test");
+
+            Assert.Equal(2, results.Count);
+            session.Verify(s => s.ExtractAllToMemoryAsync(), Times.Never);
+            session.Verify(s => s.ExtractToMemoryAsync(It.IsAny<int>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_CoversMode_SkipsBulkExtraction()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var comicPath = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(comicPath, []);
+
+        var service = CreateService();
+        var session = CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null));
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+        // The cover (page 0) is a cache miss
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test");
+
+            // Covers mode touches only page 0 — the bulk pass must not trigger
+            session.Verify(s => s.ExtractAllToMemoryAsync(), Times.Never);
+            session.Verify(s => s.ExtractToMemoryAsync(0), Times.Once);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesAsync_ExactlyHalfMisses_UsesPerPageExtraction()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var comicPath = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(comicPath, []);
+
+        var service = CreateService();
+        var session = CreateSession(
+            ("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null), ("04.jpg", null));
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+
+        // Pages 0 and 1 are cached, pages 2 and 3 are misses — exactly half, so no bulk pass
+        _mockVectorStore
+            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
+                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
+            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
+            {
+                var result = new Dictionary<string, float[]?>();
+                foreach (var (path, _, _) in entries)
+                    result[path] = path.EndsWith("|page=0", StringComparison.Ordinal)
+                        || path.EndsWith("|page=1", StringComparison.Ordinal)
+                        ? CreateEmbedding(1f)
+                        : null;
+                return result;
+            });
+
+        try
+        {
+            await service.SearchAllPagesAsync(searchDir, "test");
+
+            session.Verify(s => s.ExtractAllToMemoryAsync(), Times.Never);
+            session.Verify(s => s.ExtractToMemoryAsync(It.IsAny<int>()), Times.Exactly(2));
         }
         finally
         {
@@ -361,7 +508,7 @@ public class ComicCoverSearchServiceTests
 
         _mockArchiveReader
             .Setup(r => r.OpenSessionAsync(comicPath))
-            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)));
+            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)).Object);
 
         // Both pages are in the embedding cache (keys "{path}|page=N") — no extraction needed
         _mockVectorStore
@@ -404,7 +551,7 @@ public class ComicCoverSearchServiceTests
         // Two pages; extraction yields nothing (cache misses) — phases must still be reported
         _mockArchiveReader
             .Setup(r => r.OpenSessionAsync(It.IsAny<string>()))
-            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)));
+            .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)).Object);
 
         var status = new SyncProgress<ComicSearchStatus>();
 
@@ -497,6 +644,73 @@ public class ComicCoverSearchServiceTests
         }
     }
 
+    [Fact]
+    public async Task SearchAsync_OpenFailureNote_IsReportedToStatusChannel()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        string comicPath = Path.Combine(searchDir, "junk.cbr");
+        await File.WriteAllBytesAsync(comicPath, new byte[] { 1, 2, 3 });
+
+        var service = CreateService();
+
+        // The session opens with zero pages and carries an open-stage diagnostic —
+        // exactly the shape ArchiveReader produces when the 7z layer refuses the
+        // container ("not a known archive type"). The note must reach the UI.
+        const string note = "junk.cbr is not a known archive type — skipped as empty";
+        var session = CreateSession(); // zero pages
+        session.Setup(s => s.LastNote).Returns(note);
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+
+        var status = new SyncProgress<ComicSearchStatus>();
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test", status: status);
+
+            Assert.Contains(status.Values, v => v.Note == note);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_OpenMismatchNote_IsReportedExactlyOnce_InCoversMode()
+    {
+        // Covers mode: pageEnd == 1, the bulk path never runs — the open-stage
+        // mismatch note must still reach the UI, and exactly once.
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        string comicPath = Path.Combine(searchDir, "renamed.cbr");
+        await File.WriteAllBytesAsync(comicPath, new byte[] { 1, 2, 3 });
+
+        var service = CreateService();
+
+        const string note = "renamed.cbr: ZIP container inside '.cbr' — opened with ZIP handler";
+        var session = CreateSession(("page0.jpg", (byte[]?)null)); // one page → no bulk
+        session.Setup(s => s.LastNote).Returns(note);
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+
+        var status = new SyncProgress<ComicSearchStatus>();
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test", status: status);
+
+            Assert.Equal(1, status.Values.Count(v => v.Note == note));
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
     private ComicCoverSearchService CreateService()
     {
         var mockLogger = new Mock<ILogger<ComicCoverSearchService>>();
@@ -537,7 +751,7 @@ public class ComicCoverSearchServiceTests
         // serve embeddings from the mocked vector store (cache hits).
         _mockArchiveReader
             .Setup(r => r.OpenSessionAsync(It.IsAny<string>()))
-            .ReturnsAsync(CreateSession(("page0.jpg", (byte[]?)null)));
+            .ReturnsAsync(CreateSession(("page0.jpg", (byte[]?)null)).Object);
 
         return new ComicCoverSearchService(
             _mockArchiveReader.Object,
@@ -549,16 +763,19 @@ public class ComicCoverSearchServiceTests
 
     /// <summary>
     /// Builds a mocked archive session with the given pages (name + extracted bytes;
-    /// null bytes simulate extraction failure).
+    /// null bytes simulate extraction failure). Bulk extraction is stubbed to return
+    /// the same bytes in entry order. Returns the Mock so callers can verify calls.
     /// </summary>
-    private static IArchiveSession CreateSession(params (string Name, byte[]? Bytes)[] pages)
+    private static Mock<IArchiveSession> CreateSession(params (string Name, byte[]? Bytes)[] pages)
     {
         var session = new Mock<IArchiveSession>();
         session.Setup(s => s.ImageEntries)
             .Returns(pages.Select(p => p.Name).ToList());
         session.Setup(s => s.ExtractToMemoryAsync(It.IsAny<int>()))
             .ReturnsAsync((int index) => index >= 0 && index < pages.Length ? pages[index].Bytes : null);
-        return session.Object;
+        session.Setup(s => s.ExtractAllToMemoryAsync())
+            .ReturnsAsync(pages.Select(p => p.Bytes).ToArray());
+        return session;
     }
 
     private static float[] CreateEmbedding(float firstValue)

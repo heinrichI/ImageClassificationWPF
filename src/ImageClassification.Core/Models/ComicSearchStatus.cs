@@ -35,4 +35,12 @@ public sealed record ComicSearchStatus
 
     /// <summary>Number of images waiting in the GPU input queue (processing phase only). 0 = GPU caught up.</summary>
     public int? GpuQueueDepth { get; init; }
+
+    /// <summary>
+    /// Archive-specific diagnostic (e.g. "ZIP container inside .cbr — re-extracted with the
+    /// ZIP handler", or a bulk-pass fallback notice). Unlike <see cref="Detail"/> it is NOT
+    /// rate-limited and NOT overwritten by progress ticks — the UI accumulates every note
+    /// of the search in a visible list.
+    /// </summary>
+    public string? Note { get; init; }
 }

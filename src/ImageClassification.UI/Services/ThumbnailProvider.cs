@@ -15,15 +15,14 @@ namespace ImageClassification.UI.Services
     public class ThumbnailProvider : IDisposable
     {
         private readonly ILogger<ThumbnailProvider> _logger;
-        private readonly ImageClassification.UI.Configuration.ThumbnailSettings _settings;
+        private readonly IUserSettingsStore _settings;
         private readonly IComicCoverSearchService _coverService;
-        private readonly int _maxCacheItems = 500;
         private readonly ConcurrentDictionary<string, BitmapSource> _cache = new();
         private readonly ConcurrentQueue<(string Key, byte[]? Data, int Width, Action<BitmapSource?>? Callback)> _queue = new();
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _worker;
 
-        public ThumbnailProvider(ILogger<ThumbnailProvider> logger, ImageClassification.UI.Configuration.ThumbnailSettings settings, IComicCoverSearchService coverService)
+        public ThumbnailProvider(ILogger<ThumbnailProvider> logger, IUserSettingsStore settings, IComicCoverSearchService coverService)
         {
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
             _settings = settings ?? throw new ArgumentNullException(nameof(settings));
@@ -199,15 +198,15 @@ namespace ImageClassification.UI.Services
                             if (callback is not null)
                                 await Application.Current.Dispatcher.BeginInvoke(new Action(() => callback(image)));
 
-                            // Simple eviction
-                            if (_cache.Count > _maxCacheItems)
+                            // Evict oldest entries beyond the configured cache size (live value)
+                            var maxCached = _settings.MaxCachedThumbnails;
+                            while (maxCached > 0 && _cache.Count > maxCached)
                             {
                                 var oldest = _cache.Keys.GetEnumerator();
-                                if (oldest.MoveNext())
-                                {
-                                var oldestKey = oldest.Current;
-                                _cache.TryRemove(oldestKey, out _);
-                                }
+                                if (!oldest.MoveNext())
+                                    break;
+
+                                _cache.TryRemove(oldest.Current, out _);
                             }
                         }
                         catch (OperationCanceledException) { break; }

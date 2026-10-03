@@ -14,12 +14,19 @@
             <!-- General Settings -->
             <TextBlock Text="General" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8"/>
             <TextBlock Text="ONNX Runtime Thread Count:" Margin="0,0,0,4"/>
-            <TextBox Text="{Binding OnnxThreadCount, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+            <TextBox Text="{Binding OnnxThreadCount, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBlock Foreground="Gray" FontSize="11" Margin="0,0,0,12" MaxWidth="460" TextWrapping="Wrap"
+                Text="CPU threads used by ONNX Runtime for model inference. 0 = ONNX Runtime default (recommended).&#10;With a CUDA GPU: only the CPU pre/post-processing around the GPU calls is affected — effect is small.&#10;Without CUDA (CPU fallback): this is the main performance knob. Best value: 0 or your physical core count — more than that gives no gain.&#10;Applied when a model is loaded or reloaded."/>
 
-            <TextBlock Text="Theme:" Margin="0,0,0,4"/>
-            <ComboBox ItemsSource="{Binding Themes}" SelectedItem="{Binding SelectedTheme}" Width="150" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+            <TextBlock Text="GPU Batch Size:" Margin="0,0,0,4"/>
+            <TextBox Text="{Binding GpuBatchSize, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBlock Text="Images per GPU batch (1–256) · larger = faster, more VRAM · applies from the next search" Foreground="Gray" FontSize="11" Margin="0,0,0,12"/>
 
-            <CheckBox Content="Use GPU Acceleration (CUDA)" IsChecked="{Binding UseGpuAcceleration}" Margin="0,0,0,20"/>
+            <TextBlock Text="Thumbnail Width (px):" Margin="0,0,0,4"/>
+            <TextBox Text="{Binding ThumbnailWidth, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
+            <TextBlock Text="Max Cached Thumbnails:" Margin="0,0,0,4"/>
+            <TextBox Text="{Binding MaxCachedThumbnails, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,20"/>
 
             <!-- Model Downloads -->
             <TextBlock Text="Download Models" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8"/>

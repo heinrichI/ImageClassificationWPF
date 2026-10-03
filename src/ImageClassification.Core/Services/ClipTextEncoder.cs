@@ -16,16 +16,18 @@ internal sealed class ClipTextEncoder : IClipTextEncoder
 
     private readonly IModelDownloader _downloader;
     private readonly ILogger<BatchImageEncoder> _logger;
+    private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
     private ClipBpeTokenizer? _tokenizer;
     private InferenceSession? _session;
     private bool _initialized;
     private Task? _initTask;
     private readonly object _initLock = new();
 
-    public ClipTextEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger)
+    public ClipTextEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger, IOnnxRuntimeOptions onnxRuntimeOptions)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
         _logger = logger;
+        _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
     }
 
     private Task EnsureInitializedAsync()
@@ -57,6 +59,8 @@ internal sealed class ClipTextEncoder : IClipTextEncoder
         {
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
 
         try
         {

@@ -9,15 +9,39 @@
         d:DataContext="{d:DesignInstance Type=vm:MainViewModel, IsDesignTimeCreatable=False}"
         Title="Image Classification" Height="720" Width="1100"
         WindowStartupLocation="CenterScreen">
+    <Window.TaskbarItemInfo>
+        <!-- Progress overlay on the Windows taskbar button while a comic search runs.
+             Note: in .NET WPF the value property is named ProgressValue (.NET Framework used Value). -->
+        <TaskbarItemInfo ProgressState="{Binding ComicCoverSearch.TaskbarProgressState}"
+                         ProgressValue="{Binding ComicCoverSearch.TaskbarProgressValue}" />
+    </Window.TaskbarItemInfo>
     <DockPanel>
         <Menu DockPanel.Dock="Top"
               ItemsSource="{Binding ActiveMenuItems}">
+            <Menu.Resources>
+                <!-- Child (leaf) containers inherit the header template from the Menu but
+                     do NOT inherit its container style, so their Command must be wired
+                     explicitly. Header is intentionally not set here: the child header
+                     visual comes from the inherited HierarchicalDataTemplate. -->
+                <Style x:Key="TabMenuLeafStyle" TargetType="MenuItem">
+                    <Setter Property="Command" Value="{Binding Command}" />
+                    <Setter Property="CommandParameter" Value="{Binding CommandParameter}" />
+                </Style>
+            </Menu.Resources>
+            <!-- Configure the generated container itself (a nested inner MenuItem in an
+                 ItemTemplate does not open submenus — classic WPF pitfall). -->
+            <Menu.ItemContainerStyle>
+                <Style TargetType="MenuItem">
+                    <Setter Property="Command" Value="{Binding Command}" />
+                    <Setter Property="CommandParameter" Value="{Binding CommandParameter}" />
+                    <Setter Property="ItemContainerStyle" Value="{StaticResource TabMenuLeafStyle}" />
+                </Style>
+            </Menu.ItemContainerStyle>
+            <!-- The header visual plus the child collection that drives native submenus -->
             <Menu.ItemTemplate>
-                <DataTemplate>
-                    <MenuItem Header="{Binding Header}"
-                              Command="{Binding Command}"
-                              CommandParameter="{Binding CommandParameter}" />
-                </DataTemplate>
+                <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                    <TextBlock Text="{Binding Header}" />
+                </HierarchicalDataTemplate>
             </Menu.ItemTemplate>
         </Menu>
         <Grid>

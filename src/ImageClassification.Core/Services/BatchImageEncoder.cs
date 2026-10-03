@@ -19,6 +19,8 @@ internal sealed class BatchImageEncoder : IDisposable
 
     private readonly IModelDownloader _downloader;
     private readonly ILogger<BatchImageEncoder> _logger;
+    private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
+    private readonly IGpuPipelineOptions _gpuOptions;
     private InferenceSession? _session;
     private int _imageSize = 224;
     private bool _initialized;
@@ -26,10 +28,11 @@ internal sealed class BatchImageEncoder : IDisposable
     private readonly object _initLock = new();
 
     /// <summary>
-    /// Number of images per ONNX inference batch. Larger = higher GPU utilization.
-    /// Bound from <see cref="BatchImageEncoderSettings"/>.
+    /// Number of images per ONNX inference batch. Larger = higher GPU utilization
+    /// (and more VRAM per call). Live value from user settings — a change applies
+    /// from the next search / next batch. Values &lt; 1 fall back to 32.
     /// </summary>
-    public int BatchSize { get; private set; } = 32;
+    public int BatchSize => Math.Max(1, _gpuOptions.BatchSize);
 
     /// <summary>
     /// Number of batches to prefetch (CPU preprocessing ahead of GPU inference).
@@ -39,25 +42,14 @@ internal sealed class BatchImageEncoder : IDisposable
 
     public BatchImageEncoder(
         IModelDownloader downloader,
-        BatchImageEncoderSettings settings,
-        ILogger<BatchImageEncoder> logger)
+        IGpuPipelineOptions gpuOptions,
+        ILogger<BatchImageEncoder> logger,
+        IOnnxRuntimeOptions onnxRuntimeOptions)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-
-        ArgumentNullException.ThrowIfNull(settings);
-
-        if (settings.BatchSize <= 0)
-        {
-            BatchSize = 32;
-            _logger.LogWarning(
-                "BatchImageEncoder: invalid BatchSize={BatchSize} in configuration. Fallback to {FallbackBatchSize}.",
-                settings.BatchSize, BatchSize);
-        }
-        else
-        {
-            BatchSize = settings.BatchSize;
-        }
+        _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
+        _gpuOptions = gpuOptions ?? throw new ArgumentNullException(nameof(gpuOptions));
     }
 
     private Task EnsureInitializedAsync()
@@ -86,6 +78,8 @@ internal sealed class BatchImageEncoder : IDisposable
         {
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
 
         try
         {

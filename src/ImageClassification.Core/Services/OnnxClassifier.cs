@@ -11,6 +11,7 @@ namespace ImageClassification.Core.Services;
 internal sealed class OnnxClassifier : IImageClassifier
 {
     private readonly IModelDownloader _downloader;
+    private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
     private InferenceSession? _session;
     private string[] _labels = Array.Empty<string>();
     private int _imageSize = 224;
@@ -20,9 +21,10 @@ internal sealed class OnnxClassifier : IImageClassifier
 
     public ModelInfo Model { get; private set; } = new();
 
-    public OnnxClassifier(IModelDownloader downloader)
+    public OnnxClassifier(IModelDownloader downloader, IOnnxRuntimeOptions onnxRuntimeOptions)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
+        _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
     }
 
     private Task EnsureInitializedAsync()
@@ -50,10 +52,10 @@ internal sealed class OnnxClassifier : IImageClassifier
 
         var sessionOptions = new SessionOptions
         {
-            InterOpNumThreads = 4,
-            IntraOpNumThreads = 4,
             GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
         };
+
+        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
 
         _session = new InferenceSession(modelPath, sessionOptions);
 

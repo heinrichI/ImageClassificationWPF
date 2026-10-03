@@ -4,6 +4,9 @@
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <!-- The 7z native interop (P/Invoke + COM marshalling) is Windows-only by
+         design: the app ships for Windows and 7z.dll is a Win32 library. -->
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
     <AssemblyTitle>ImageClassification.ArchiveReader</AssemblyTitle>
     <Product>ImageClassification.ArchiveReader</Product>
     <Description>CBZ/CBR archive reader using SevenZipExtractor for comic cover search</Description>

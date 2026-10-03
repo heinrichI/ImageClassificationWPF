@@ -1,6 +1,7 @@
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ImageClassification.Core.Interfaces;
+using ImageClassification.Core.Models;
 
 namespace ImageClassification.VectorStore;
 
@@ -12,14 +13,18 @@ namespace ImageClassification.VectorStore;
 internal sealed class SqliteVectorStore : IVectorStore
 {
     private readonly SqliteConnectionPool _pool;
+    private readonly string? _dbPath;
     private readonly ILogger<SqliteVectorStore>? _logger;
     private bool _disposed;
+
+    public string? DatabasePath => _dbPath;
 
     public SqliteVectorStore(string? dbPath = null, ILogger<SqliteVectorStore>? logger = null)
     {
         var path = dbPath ?? Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory,
             "vector_cache.db");
+        _dbPath = path;
         _pool = new SqliteConnectionPool(path);
         _logger = logger;
         Initialize();
@@ -28,9 +33,10 @@ internal sealed class SqliteVectorStore : IVectorStore
     /// <summary>
     /// Internal constructor for testing — allows injecting a pre-built pool.
     /// </summary>
-    internal SqliteVectorStore(SqliteConnectionPool pool, ILogger<SqliteVectorStore>? logger = null)
+    internal SqliteVectorStore(SqliteConnectionPool pool, string? dbPath = null, ILogger<SqliteVectorStore>? logger = null)
     {
         _pool = pool ?? throw new ArgumentNullException(nameof(pool));
+        _dbPath = dbPath;
         _logger = logger;
         Initialize();
     }
@@ -170,6 +176,7 @@ internal sealed class SqliteVectorStore : IVectorStore
             using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
             int hits = 0;
             int stale = 0;
+            string? firstStaleDetail = null;
             while (await reader.ReadAsync().ConfigureAwait(false))
             {
                 var filePath = reader.GetString(0);
@@ -188,6 +195,11 @@ internal sealed class SqliteVectorStore : IVectorStore
                 else
                 {
                     stale++;
+                    // Remember the first stale entry so the aggregated line shows a concrete sample
+                    if (firstStaleDetail is null)
+                    {
+                        firstStaleDetail = $"; first stale: {filePath} stored(lm={storedLm}, fs={storedFs}) vs current(lm={currentLm.ToString("O")}, fs={currentFs})";
+                    }
                 }
             }
 
@@ -196,8 +208,10 @@ internal sealed class SqliteVectorStore : IVectorStore
             if (_logger is not null && (stale > 0 || hits < entries.Count))
             {
                 _logger.LogDebug(
-                    "[VectorStore] Batch: {Requested} requested, {Hits} hit(s), {Stale} stale, {Missing} missing (model {ModelName})",
-                    entries.Count, hits, stale, entries.Count - hits - stale, modelName);
+                    "[VectorStore] Batch: {Requested} requested, {Hits} hit(s), {Stale} stale, {Missing} missing (model {ModelName}); first key: {FirstKey}{Sample}",
+                    entries.Count, hits, stale, entries.Count - hits - stale, modelName,
+                    entries[0].FilePath,
+                    firstStaleDetail ?? string.Empty);
             }
         }
         finally
@@ -228,6 +242,163 @@ internal sealed class SqliteVectorStore : IVectorStore
         {
             _pool.Return(conn);
         }
+    }
+
+    public async Task<VectorCacheInfo> GetCacheInfoAsync()
+    {
+        long total = 0, allPages = 0;
+        DateTime? oldest = null, newest = null;
+        var models = new List<string>();
+
+        var conn = _pool.Rent();
+        try
+        {
+            using var cmd = new SqliteCommand(@"
+                SELECT model_name,
+                       COUNT(*),
+                       COALESCE(SUM(CASE WHEN instr(file_path, '|page=') > 0 THEN 1 ELSE 0 END), 0),
+                       MIN(created_at),
+                       MAX(created_at)
+                FROM embeddings
+                GROUP BY model_name");
+            cmd.Connection = conn;
+
+            using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+            while (await reader.ReadAsync().ConfigureAwait(false))
+            {
+                models.Add(reader.GetString(0));
+                total += reader.GetInt64(1);
+                allPages += reader.GetInt64(2);
+                oldest = MinUtc(oldest, reader.GetString(3));
+                newest = MaxUtc(newest, reader.GetString(4));
+            }
+        }
+        finally
+        {
+            _pool.Return(conn);
+        }
+
+        return new VectorCacheInfo(
+            DatabasePath,
+            SafeFileSize(_dbPath),
+            SafeFileSize(_dbPath is null ? null : _dbPath + "-wal"),
+            total,
+            total - allPages,
+            allPages,
+            oldest,
+            newest,
+            string.Join(", ", models));
+    }
+
+    public async Task<VectorCacheMaintenanceResult> OptimizeAsync()
+    {
+        if (_dbPath is null)
+            return new VectorCacheMaintenanceResult("optimize", true, "In-memory store — nothing to do.");
+
+        try
+        {
+            var conn = _pool.Rent();
+            try
+            {
+                using var cmd = new SqliteCommand("PRAGMA wal_checkpoint(TRUNCATE)");
+                cmd.Connection = conn;
+
+                int busy = -1, log = -1, checkpointed = -1;
+                using (var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false))
+                {
+                    if (await reader.ReadAsync().ConfigureAwait(false))
+                    {
+                        busy = reader.GetInt32(0);
+                        log = reader.GetInt32(1);
+                        checkpointed = reader.GetInt32(2);
+                    }
+                }
+
+                using (var opt = new SqliteCommand("PRAGMA optimize"))
+                {
+                    opt.Connection = conn;
+                    await opt.ExecuteNonQueryAsync().ConfigureAwait(false);
+                }
+
+                var dbSize = SafeFileSize(_dbPath);
+                var walSize = SafeFileSize(_dbPath + "-wal");
+                var detail = $"WAL: {log} frame(s), {checkpointed} checkpointed, file truncated to {walSize:N0} bytes; " +
+                             $"database file {dbSize:N0} bytes; busy={busy}";
+                _logger?.LogInformation("[VectorStore] Optimize: {Detail}", detail);
+                return new VectorCacheMaintenanceResult("optimize", true, detail);
+            }
+            finally
+            {
+                _pool.Return(conn);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogError(ex, "[VectorStore] Optimize failed");
+            return new VectorCacheMaintenanceResult("optimize", false, ex.Message);
+        }
+    }
+
+    public async Task<VectorCacheMaintenanceResult> VacuumAsync()
+    {
+        if (_dbPath is null)
+            return new VectorCacheMaintenanceResult("vacuum", true, "In-memory store — nothing to do.");
+
+        var sizeBefore = SafeFileSize(_dbPath);
+        try
+        {
+            var conn = _pool.Rent();
+            try
+            {
+                using var cmd = new SqliteCommand("VACUUM");
+                cmd.Connection = conn;
+                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
+
+                var sizeAfter = SafeFileSize(_dbPath);
+                var detail = $"Database rebuilt: {sizeBefore:N0} → {sizeAfter:N0} bytes " +
+                             $"(freed {sizeBefore - sizeAfter:N0} bytes)";
+                _logger?.LogInformation("[VectorStore] Vacuum: {Detail}", detail);
+                return new VectorCacheMaintenanceResult("vacuum", true, detail);
+            }
+            finally
+            {
+                _pool.Return(conn);
+            }
+        }
+        catch (Exception ex)
+        {
+            // e.g. SQLITE_BUSY while another connection holds a read snapshot
+            _logger?.LogError(ex, "[VectorStore] Vacuum failed");
+            return new VectorCacheMaintenanceResult("vacuum", false, ex.Message);
+        }
+    }
+
+    private static long SafeFileSize(string? path)
+    {
+        try { return path is null || !File.Exists(path) ? 0 : new FileInfo(path).Length; }
+        catch { return 0; }
+    }
+
+    private static DateTime? ParseUtc(string? value)
+    {
+        return value is not null
+            && DateTime.TryParse(value, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var result)
+            ? result
+            : null;
+    }
+
+    private static DateTime? MinUtc(DateTime? current, string? value)
+    {
+        var parsed = ParseUtc(value);
+        return parsed is null ? current : (current is null || parsed < current ? parsed : current);
+    }
+
+    private static DateTime? MaxUtc(DateTime? current, string? value)
+    {
+        var parsed = ParseUtc(value);
+        return parsed is null ? current : (current is null || parsed > current ? parsed : current);
     }
 
     public void Dispose()

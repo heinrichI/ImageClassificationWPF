@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using ImageClassification.Tests;
 using System.Threading;
 using System.Threading.Tasks;
 using ImageClassification.Core.Interfaces;
@@ -136,11 +137,10 @@ public class ComicCoverSearchViewModelTests
         };
 
         var fakeService = new FakeSearchService(results);
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
-        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
 
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
             DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
             QueryText = "q",
@@ -169,10 +169,9 @@ public class ComicCoverSearchViewModelTests
         var copyService = new ImageCopyService(archiveReader.Object, NullLogger<ImageCopyService>.Instance);
 
         var fakeService = new FakeSearchService(new List<ComicCoverResult>());
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
         var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
-            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService);
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService);
 
         vm.Results.Add(new ComicCoverItem { ArchivePath = "a.cbz", ArchiveFileName = "a.cbz", PageIndex = 2 });
         vm.Results.Add(new ComicCoverItem { ArchivePath = "b.cbr", ArchiveFileName = "b.cbr", PageIndex = 0 });
@@ -200,11 +199,10 @@ public class ComicCoverSearchViewModelTests
     public void CopyResultsImagesCommand_Disabled_WhenNoResults()
     {
         var fakeService = new FakeSearchService(new List<ComicCoverResult>());
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
         var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
-            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService);
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService);
 
         Assert.False(vm.CopyResultsImagesCommand.CanExecute(null));
 
@@ -221,12 +219,11 @@ public class ComicCoverSearchViewModelTests
             new ComicCoverResult { ArchivePath = "a1", ArchiveFileName = "a1.cbr", SimilarityScore = 0.9f }
         };
         var fakeService = new GatedSearchService(results);
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
         var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
-            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
 
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
             DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
             QueryText = "q",
@@ -257,12 +254,11 @@ public class ComicCoverSearchViewModelTests
         // Arrange: service reports a full detail line (no trailing "...") + (1/2) progress,
         // then blocks on the gate
         var fakeService = new DetailGatedSearchService();
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
         var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
-            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
 
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
             DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
             QueryText = "q",
@@ -296,11 +292,10 @@ public class ComicCoverSearchViewModelTests
             new ComicCoverResult { ArchivePath = "a1", ArchiveFileName = "a1.cbr", SimilarityScore = 0.9f }
         };
         var fakeService = new FakeSearchService(results);
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
         var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
-            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
             DirectoryPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "definitely_missing_dir_" + Guid.NewGuid().ToString("N")),
             QueryText = "q"
@@ -325,11 +320,10 @@ public class ComicCoverSearchViewModelTests
             new ComicCoverResult { ArchivePath = "a2", ArchiveFileName = "a2.cbr", SimilarityScore = 0.70f }
         };
         var fakeService = new FakeSearchService(results);
-        var thumbnailSettings = new ImageClassification.UI.Configuration.ThumbnailSettings { ThumbnailWidth = 64, ThumbnailHeight = 96 };
         var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
-            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, thumbnailSettings, fakeService);
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
         var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
-        var vm = new ComicCoverSearchViewModel(fakeService, NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
         {
             DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
             QueryText = "q",
@@ -348,5 +342,99 @@ public class ComicCoverSearchViewModelTests
         // Assert: the final notification must evaluate to true (IsBusy already false)
         Assert.True(lastCanExecute);
         Assert.True(vm.CopyResultsImagesCommand.CanExecute(null));
+    }
+
+    /// <summary>
+    /// Reports two archive-note diagnostics (a container mismatch and a bulk fallback)
+    /// on the status channel, then waits on the gate so the test thread can pump the
+    /// status handlers while the search is still in flight (handlers delivered after
+    /// the search finishes are stale and intentionally dropped by the VM).
+    /// A fresh gate is created for every search invocation.
+    /// </summary>
+    private sealed class NotesSearchService : IComicCoverSearchService
+    {
+        public const string NoteMismatch = "a.cbr: ZIP container inside '.cbr' — re-extracted with ZIP handler";
+        public const string NoteFallback = "b.cbr: bulk failed (7z Open failed) — per-entry fallback";
+
+        /// <summary>Gate for the current (in-flight) search; re-created on each call.</summary>
+        public TaskCompletionSource<bool> Gate { get; private set; } = new();
+
+        public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
+
+        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+
+        public Task ClearCacheAsync() => Task.CompletedTask;
+
+        public void Dispose() { }
+
+        public async Task<List<ComicCoverResult>> SearchAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+        {
+            Gate = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            status?.Report(new ComicSearchStatus { Note = NoteMismatch });
+            status?.Report(new ComicSearchStatus { Note = NoteFallback });
+            await Gate.Task.ConfigureAwait(false);
+            return new List<ComicCoverResult>
+            {
+                new ComicCoverResult { ArchivePath = "a1", ArchiveFileName = "a.cbr", SimilarityScore = 0.9f }
+            };
+        }
+
+        public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, query, status, ct);
+    }
+
+    [Fact]
+    public async Task SearchAsync_ArchiveNotes_Accumulate_AndAreClearedOnNewSearch()
+    {
+        // Arrange: service reports two notes per search, then holds the search in flight
+        var fakeService = new NotesSearchService();
+        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance, new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 }, fakeService);
+        var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
+        var vm = new ComicCoverSearchViewModel(fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance, thumbnailProvider, copyService)
+        {
+            DirectoryPath = System.IO.Directory.GetCurrentDirectory(),
+            QueryText = "q",
+            SimilarityThreshold = 0.25
+        };
+
+        var mi = typeof(ComicCoverSearchViewModel).GetMethod("SearchAsync", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+        // Act: first search (in flight, held by the gate)
+        var searchTask = (Task)mi.Invoke(vm, null)!;
+
+        // Wait until the in-flight search's status handlers applied both notes
+        // (the test thread pumps the posted status updates while awaiting)
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (vm.ArchiveNotes.Count < 2 && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+
+        // Assert: both notes accumulated; visibility counter matches
+        // (order is not asserted: the test SynchronizationContext may deliver
+        // posted status updates out of order — the WPF dispatcher is FIFO)
+        Assert.Equal(2, vm.ArchiveNotes.Count);
+        Assert.Contains(NotesSearchService.NoteMismatch, vm.ArchiveNotes);
+        Assert.Contains(NotesSearchService.NoteFallback, vm.ArchiveNotes);
+        Assert.Equal(vm.ArchiveNotes.Count, vm.ArchiveNotesCount);
+
+        // Complete the first search
+        fakeService.Gate.SetResult(true);
+        await searchTask;
+
+        // Act: a new search must start from an empty list (in flight again)
+        searchTask = (Task)mi.Invoke(vm, null)!;
+        deadline = DateTime.UtcNow.AddSeconds(5);
+        while (vm.ArchiveNotes.Count < 2 && DateTime.UtcNow < deadline)
+            await Task.Delay(10);
+
+        // Assert: the notes were cleared before re-reporting (2, not 4)
+        Assert.Equal(2, vm.ArchiveNotes.Count);
+        Assert.Contains(NotesSearchService.NoteMismatch, vm.ArchiveNotes);
+        Assert.Contains(NotesSearchService.NoteFallback, vm.ArchiveNotes);
+
+        fakeService.Gate.SetResult(true);
+        await searchTask;
     }
 }

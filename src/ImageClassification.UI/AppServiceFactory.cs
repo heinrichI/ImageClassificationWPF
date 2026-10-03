@@ -3,7 +3,6 @@ using ImageClassification.UI.Configuration;
 using ImageClassification.UI.ViewModels;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Options;
  
 namespace ImageClassification.UI;
  
@@ -23,17 +22,15 @@ public static class AppServiceFactory
                 services.AddArchiveReader();
                 services.AddVectorStore();
                 services.AddImageClassificationCore();
- 
-                // Bind ThumbnailSettings from configuration
-                services.Configure<ThumbnailSettings>(context.Configuration.GetSection("ThumbnailSettings"));
-                services.AddSingleton(sp => sp.GetRequiredService<IOptions<ThumbnailSettings>>().Value);
 
-                // Bind BatchImageEncoder settings from configuration
-                services.Configure<BatchImageEncoderSettings>(context.Configuration.GetSection("BatchImageEncoder"));
-                services.AddSingleton(sp => sp.GetRequiredService<IOptions<BatchImageEncoderSettings>>().Value);
- 
-                // Thumbnail infrastructure (background loader + LRU cache)
-                services.AddSingleton<Services.ThumbnailCache>();
+                // User settings: user-settings.json in the program directory, live (file watcher).
+                // The store bridges to core via IOnnxRuntimeOptions / IGpuPipelineOptions;
+                // the thumbnail pipeline and the settings view-model read it directly.
+                services.AddSingleton<IUserSettingsStore, UserSettingsStore>();
+                services.AddSingleton<IOnnxRuntimeOptions, UserSettingsOnnxBridge>();
+                services.AddSingleton<IGpuPipelineOptions, UserSettingsGpuBridge>();
+
+                // Thumbnail infrastructure (background loader + bounded cache)
                 services.AddSingleton<Services.ThumbnailProvider>();
 
                 // Copy comic search result images (in-memory extraction, no temp files)
