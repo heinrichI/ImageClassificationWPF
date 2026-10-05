@@ -35,7 +35,7 @@ public class ComicCoverSearchViewModelTests
             return Task.FromResult(_results.ToList());
         }
 
-        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+        public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
 
         public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query, IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
         {
@@ -62,7 +62,7 @@ public class ComicCoverSearchViewModelTests
 
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
-        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+        public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 
@@ -99,7 +99,7 @@ public class ComicCoverSearchViewModelTests
 
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
-        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+        public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 
@@ -361,7 +361,7 @@ public class ComicCoverSearchViewModelTests
 
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
-        public Task<byte[]?> ExtractCoverAsync(string archivePath) => Task.FromResult<byte[]?>(null);
+        public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 

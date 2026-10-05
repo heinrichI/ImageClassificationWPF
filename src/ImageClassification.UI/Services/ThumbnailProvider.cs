@@ -17,7 +17,13 @@ namespace ImageClassification.UI.Services
         private readonly ILogger<ThumbnailProvider> _logger;
         private readonly IUserSettingsStore _settings;
         private readonly IComicCoverSearchService _coverService;
-        private readonly ConcurrentDictionary<string, BitmapSource> _cache = new();
+        // LRU-bounded in-memory thumbnail cache: _cacheOrder holds keys from least to
+        // recently used; a cache access moves the key to the end (hot thumbnails survive
+        // eviction) and entries beyond MaxCachedThumbnails are evicted from the front.
+        // All access happens under _cacheLock (UI thread reads, worker thread adds).
+        private readonly object _cacheLock = new();
+        private readonly Dictionary<string, BitmapSource> _cache = new();
+        private readonly List<string> _cacheOrder = new();
         private readonly ConcurrentQueue<(string Key, byte[]? Data, int Width, Action<BitmapSource?>? Callback)> _queue = new();
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _worker;
@@ -33,7 +39,7 @@ namespace ImageClassification.UI.Services
         public void Enqueue(string path, int width, Action<BitmapSource?>? callback = null)
         {
             if (string.IsNullOrEmpty(path)) return;
-            if (_cache.ContainsKey(path)) return;
+            if (CacheTryGet(path, out _)) return; // already loaded — the access marks it hot
             _queue.Enqueue((path, null, width > 0 ? width : _settings.ThumbnailWidth, callback));
         }
 
@@ -48,7 +54,7 @@ namespace ImageClassification.UI.Services
                 return placeholder;
             }
 
-            if (_cache.TryGetValue(path, out var bs))
+            if (CacheTryGet(path, out var bs))
             {
                 return bs;
             }
@@ -60,17 +66,26 @@ namespace ImageClassification.UI.Services
             return ph;
         }
 
-        public void EnsureCoverAndEnqueue(string archivePath, Action<BitmapSource?>? onLoaded = null)
+        /// <summary>
+        /// Extracts the page image (page index 0 = cover) of <paramref name="archivePath"/>
+        /// into memory and enqueues its decode. The thumbnail cache key is page-specific —
+        /// "{path}" for the cover, "{path}|page=N" otherwise (same convention as the
+        /// embedding cache keys) — so pages of one archive never alias each other.
+        /// </summary>
+        public void EnsurePageAndEnqueue(string archivePath, int pageIndex, Action<BitmapSource?>? onLoaded = null)
         {
             if (string.IsNullOrEmpty(archivePath)) return;
+            if (pageIndex < 0) pageIndex = 0;
+
+            string cacheKey = pageIndex == 0 ? archivePath : $"{archivePath}|page={pageIndex}";
 
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    if (_cache.ContainsKey(archivePath)) return;
+                    if (CacheTryGet(cacheKey, out _)) return;
 
-                    var bytes = await _coverService.ExtractCoverAsync(archivePath).ConfigureAwait(false);
+                    var bytes = await _coverService.ExtractPageAsync(archivePath, pageIndex).ConfigureAwait(false);
                     if (bytes is null || bytes.Length == 0)
                     {
                         if (onLoaded is not null)
@@ -80,20 +95,66 @@ namespace ImageClassification.UI.Services
                         return;
                     }
 
-                    // Enqueue decoding of the in-memory cover bytes
-                    _queue.Enqueue((archivePath, bytes, _settings.ThumbnailWidth, onLoaded));
+                    // Enqueue decoding of the in-memory page bytes
+                    _queue.Enqueue((cacheKey, bytes, _settings.ThumbnailWidth, onLoaded));
                 }
                 catch (OperationCanceledException) { /* cancelled */ }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "EnsureCoverAndEnqueue failed for {ArchivePath}", archivePath);
+                    _logger.LogDebug(ex, "EnsurePageAndEnqueue failed for {ArchivePath} page {PageIndex}", archivePath, pageIndex);
                 }
             });
         }
 
         public void Clear()
         {
-            _cache.Clear();
+            lock (_cacheLock)
+            {
+                _cache.Clear();
+                _cacheOrder.Clear();
+            }
+        }
+
+        /// <summary>LRU get: a hit moves the key to the most-recently-used end.</summary>
+        private bool CacheTryGet(string key, out BitmapSource? image)
+        {
+            lock (_cacheLock)
+            {
+                if (_cache.TryGetValue(key, out var hit))
+                {
+                    _cacheOrder.Remove(key);
+                    _cacheOrder.Add(key);
+                    image = hit;
+                    return true;
+                }
+                image = null;
+                return false;
+            }
+        }
+
+        /// <summary>Adds an entry and evicts the least recently used entries beyond the limit.</summary>
+        private void CacheAdd(string key, BitmapSource image, int maxCached)
+        {
+            lock (_cacheLock)
+            {
+                if (_cache.ContainsKey(key))
+                {
+                    _cache[key] = image;
+                    _cacheOrder.Remove(key);
+                    _cacheOrder.Add(key);
+                    return;
+                }
+
+                _cache[key] = image;
+                _cacheOrder.Add(key);
+
+                while (maxCached > 0 && _cache.Count > maxCached)
+                {
+                    string oldest = _cacheOrder[0];
+                    _cacheOrder.RemoveAt(0);
+                    _cache.Remove(oldest);
+                }
+            }
         }
 
         private BitmapSource CreatePlaceholder(int width, int height)
@@ -193,21 +254,10 @@ namespace ImageClassification.UI.Services
                                 image = bmp;
                             }
 
-                            _cache[key] = image;
+                            CacheAdd(key, image, _settings.MaxCachedThumbnails);
 
                             if (callback is not null)
                                 await Application.Current.Dispatcher.BeginInvoke(new Action(() => callback(image)));
-
-                            // Evict oldest entries beyond the configured cache size (live value)
-                            var maxCached = _settings.MaxCachedThumbnails;
-                            while (maxCached > 0 && _cache.Count > maxCached)
-                            {
-                                var oldest = _cache.Keys.GetEnumerator();
-                                if (!oldest.MoveNext())
-                                    break;
-
-                                _cache.TryRemove(oldest.Current, out _);
-                            }
                         }
                         catch (OperationCanceledException) { break; }
                         catch (Exception ex)

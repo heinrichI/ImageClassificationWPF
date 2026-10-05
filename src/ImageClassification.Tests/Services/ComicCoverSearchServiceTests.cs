@@ -711,6 +711,28 @@ public class ComicCoverSearchServiceTests
         }
     }
 
+    [Fact]
+    public async Task ExtractPageAsync_ExtractsRequestedPage_NotCover()
+    {
+        var comicPath = Path.Combine(Path.GetTempPath(), "page_extract_test.cbz");
+
+        var service = CreateService();
+        var session = CreateSession(
+            ("01.jpg", new byte[] { 1 }),
+            ("02.jpg", new byte[] { 2 }),
+            ("03.jpg", new byte[] { 3 }));
+        _mockArchiveReader
+            .Setup(r => r.OpenSessionAsync(comicPath))
+            .ReturnsAsync(session.Object);
+
+        // A non-cover page must be extracted, never the cover (page 0)
+        var bytes = await service.ExtractPageAsync(comicPath, 2);
+
+        Assert.Equal(new byte[] { 3 }, bytes);
+        session.Verify(s => s.ExtractToMemoryAsync(2), Times.Once);
+        session.Verify(s => s.ExtractToMemoryAsync(0), Times.Never);
+    }
+
     private ComicCoverSearchService CreateService()
     {
         var mockLogger = new Mock<ILogger<ComicCoverSearchService>>();

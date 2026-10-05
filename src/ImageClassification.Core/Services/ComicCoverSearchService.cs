@@ -409,7 +409,7 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                                 }
 
                                 _logger.LogInformation(
-                                    "[Pipeline] {Name}: {Hits}/{Total} page(s) from cache{Misses}",
+                                    "[Pipeline] {Name}: {Hits}/{Total} page(s) та длfrom cache{Misses}",
                                     Path.GetFileName(path), archiveHits, pageEnd,
                                     archiveMisses > 0 ? $", {archiveMisses} cache miss" : string.Empty);
                             }
@@ -532,10 +532,10 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     }
 
     /// <inheritdoc />
-    public async Task<byte[]?> ExtractCoverAsync(string archivePath)
+    public async Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex)
     {
         using var session = await _archiveReader.OpenSessionAsync(archivePath).ConfigureAwait(false);
-        return await session.ExtractToMemoryAsync(0).ConfigureAwait(false);
+        return await session.ExtractToMemoryAsync(pageIndex).ConfigureAwait(false);
     }
 
     /// <inheritdoc />

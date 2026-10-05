@@ -56,7 +56,12 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             "All pages"
         };
 
-        Results.CollectionChanged += (_, _) => CopyResultsImagesCommand.NotifyCanExecuteChanged();
+        Results.CollectionChanged += (_, _) =>
+        {
+            CopyResultsImagesCommand.NotifyCanExecuteChanged();
+            OnPropertyChanged(nameof(HasResults));
+            OnPropertyChanged(nameof(ResultsCountText));
+        };
     }
 
     // ────────────────────────────── Observable properties ──────────────────────────────
@@ -103,6 +108,15 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     [ObservableProperty]
     private int _selectedModeIndex;
 
+    /// <summary>
+    /// Index of the inner panel inside the Comic Search tab: 0 = Search settings,
+    /// 1 = Results. Bound to the inner TabControl SelectedIndex. The VM switches to
+    /// the search panel when a run starts and to the results panel when it finishes
+    /// with at least one match.
+    /// </summary>
+    [ObservableProperty]
+    private int _selectedInnerTabIndex;
+
     public float ProgressPercent => ProgressTotal > 0
         ? (ProgressCurrent / (float)ProgressTotal) * 100f
         : 0f;
@@ -148,6 +162,17 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     }
 
     public ObservableCollection<ComicCoverItem> Results { get; } = new();
+
+    /// <summary>
+    /// True when the Results collection holds at least one item.
+    /// Drives the "no results yet" placeholder on the results panel.
+    /// </summary>
+    public bool HasResults => Results.Count > 0;
+
+    /// <summary>
+    /// Header text of the results tab: "Results (N)" while populated, plain "Results" otherwise.
+    /// </summary>
+    public string ResultsCountText => Results.Count > 0 ? $"Results ({Results.Count})" : "Results";
 
     /// <summary>
     /// Archive diagnostics collected during the current search (container mismatches such as
@@ -235,6 +260,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         }
 
         IsBusy = true;
+        SelectedInnerTabIndex = 0; // show the settings/progress panel while the search runs
         int runId = Interlocked.Increment(ref _uiUpdateRunId);
         _currentPhase = "Preparing search...";
         StatusMessage = "Preparing search...";
@@ -363,8 +389,8 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
                     PageCount = result.PageCount
                 };
 
-                // Extract cover in memory and set the thumbnail when loaded
-                _thumbnailProvider.EnsureCoverAndEnqueue(result.ArchivePath, b => item.Thumbnail = b);
+                // Extract the result page (cover for page 0) in memory and set the thumbnail when loaded
+                _thumbnailProvider.EnsurePageAndEnqueue(result.ArchivePath, result.PageIndex, b => item.Thumbnail = b);
  
                 // Add to results (thumbnail callback will update UI when available)
                 Results.Add(item);
@@ -376,6 +402,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
                 StatusMessage = $"Found {Results.Count} matching {modeText} (filtered from {results.Count} total, " +
                     $"scores: {filtered.Min(r => r.SimilarityScore):P1}–{filtered.Max(r => r.SimilarityScore):P1}, " +
                     $"median: {filtered.OrderBy(r => r.SimilarityScore).ElementAt(filtered.Count / 2).SimilarityScore:P1})";
+                SelectedInnerTabIndex = 1; // auto-switch to the full-height results panel
             }
             else if (results.Count == 0)
             {

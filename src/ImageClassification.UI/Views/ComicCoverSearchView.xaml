@@ -9,250 +9,275 @@
              d:DataContext="{d:DesignInstance Type=vm:ComicCoverSearchViewModel, IsDesignTimeCreatable=False}">
     <Grid Margin="10">
         <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Directory selection -->
-        <GroupBox Header="1. Select comic archive directory" Grid.Row="0" Margin="0,0,0,5">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0"
-                         Text="{Binding DirectoryPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         VerticalAlignment="Center"
-                         Margin="0,0,5,0" />
-                <Button Grid.Column="1"
-                        Content="Browse..."
-                        Command="{Binding BrowseDirectoryCommand}"
-                        Padding="10,5" />
-            </Grid>
-        </GroupBox>
+        <!-- Inner panels: search settings (or full-height results). The VM switches
+             to the results panel automatically when a search finishes with matches. -->
+        <TabControl Grid.Row="0"
+                    SelectedIndex="{Binding SelectedInnerTabIndex}">
 
-        <!-- Query input and action buttons -->
-        <GroupBox Header="2. Search query" Grid.Row="1" Margin="0,0,0,5">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBox Grid.Column="0"
-                         Text="{Binding QueryText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                         VerticalAlignment="Center"
-                         Margin="0,0,5,0" />
-                <Button Grid.Column="1"
-                        Content="Search"
-                        Command="{Binding SearchCommand}"
-                        IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBoolConverter}}"
-                        Padding="15,5"
-                        Margin="0,0,5,0" />
-                <Button Grid.Column="2"
-                        Content="Cancel"
-                        Command="{Binding CancelCommand}"
-                        IsEnabled="{Binding IsBusy}"
-                        Padding="15,5" />
-            </Grid>
-        </GroupBox>
+            <!-- ────────────────────────────── Search panel ────────────────────────────── -->
+            <TabItem Header="Search">
+                <Grid Margin="5">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
 
-        <!-- Similarity threshold with tooltip -->
-        <GroupBox Header="3. Similarity threshold" Grid.Row="2" Margin="0,0,0,5">
-            <GroupBox.ToolTip>
-                <TextBlock>
-                    Minimum similarity score: results below this threshold are hidden.
-                    <LineBreak />
-                    Values range from 0% (show all) to 100% (exact match only).
-                </TextBlock>
-            </GroupBox.ToolTip>
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                    <ColumnDefinition Width="Auto" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0"
-                           Text="Min:"
-                           VerticalAlignment="Center"
-                           Margin="0,0,5,0" />
-                <controls:NumericUpDownControl Grid.Column="1"
-                                               Minimum="0"
-                                               Maximum="1"
-                                               Step="0.01"
-                                               Format="P0"
-                                               Value="{Binding SimilarityThreshold, Mode=TwoWay}"
-                                               VerticalAlignment="Center"
-                                               Margin="0,0,5,0" />
-                <TextBlock Grid.Column="2"
-                           Text="{Binding SimilarityThreshold, StringFormat=P0}"
-                           VerticalAlignment="Center"
-                           Width="45"
-                           TextAlignment="Center" />
-            </Grid>
-        </GroupBox>
-
-        <!-- Search mode -->
-        <GroupBox Header="4. Search mode" Grid.Row="3" Margin="0,0,0,5">
-            <Grid>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto" />
-                    <ColumnDefinition Width="*" />
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0"
-                           Text="Mode:"
-                           VerticalAlignment="Center"
-                           Margin="0,0,5,0" />
-                <ComboBox Grid.Column="1"
-                          ItemsSource="{Binding SearchModes}"
-                          SelectedIndex="{Binding SelectedModeIndex, Mode=TwoWay}"
-                          VerticalAlignment="Center"
-                          Margin="0,0,5,0" />
-            </Grid>
-        </GroupBox>
-
-        <!-- Progress bar -->
-        <Grid Grid.Row="4" Margin="0,0,0,5">
-            <ProgressBar Minimum="0"
-                         Maximum="{Binding ProgressTotal, Mode=OneWay}"
-                         Value="{Binding ProgressCurrent, Mode=OneWay}"
-                         Height="20"
-                         Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisConverter}}"
-                         IsIndeterminate="{Binding ProgressTotal, Converter={StaticResource ZeroToBoolConverter}}" />
-            <TextBlock HorizontalAlignment="Right"
-                       VerticalAlignment="Center"
-                       Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisConverter}}">
-                <TextBlock.Text>
-                    <MultiBinding StringFormat="{}{0} / {1}">
-                        <Binding Path="ProgressCurrent"/>
-                        <Binding Path="ProgressTotal"/>
-                    </MultiBinding>
-                </TextBlock.Text>
-            </TextBlock>
-        </Grid>
-        <StackPanel Grid.Row="5" Margin="0,0,0,5">
-            <TextBlock Text="{Binding StatusMessage}"
-                       HorizontalAlignment="Center"
-                       VerticalAlignment="Center"
-                       TextWrapping="Wrap"
-                       Visibility="{Binding StatusMessage, Converter={StaticResource NonEmptyStringToVisibilityConverter}}"
-                       Margin="0,0,0,5" />
-
-            <!-- Archive diagnostics collected during the search (container mismatches,
-                 bulk fallbacks). Visible only while it has entries. -->
-            <GroupBox Header="Archive notes"
-                      Margin="0,0,0,2"
-                      Visibility="{Binding ArchiveNotesCount, Converter={StaticResource CountToVisConverter}}">
-                <ListBox ItemsSource="{Binding ArchiveNotes}"
-                         Height="72"
-                         FontSize="11"
-                         ScrollViewer.VerticalScrollBarVisibility="Auto"
-                         Background="Transparent"
-                         BorderThickness="0">
-                    <ListBox.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock Text="{Binding}" Foreground="OrangeRed" TextWrapping="Wrap" />
-                        </DataTemplate>
-                    </ListBox.ItemTemplate>
-                </ListBox>
-            </GroupBox>
-        </StackPanel>
-
-        <!-- Results list -->
-        <ListView Grid.Row="6"
-                  ItemsSource="{Binding Results}"
-                  VirtualizingPanel.ScrollUnit="Pixel"
-                  ScrollViewer.HorizontalScrollBarVisibility="Disabled"
-                  Margin="0,0,0,5">
-            <ListView.ItemsPanel>
-                <ItemsPanelTemplate>
-                    <WrapPanel Orientation="Horizontal" />
-                </ItemsPanelTemplate>
-            </ListView.ItemsPanel>
-            <ListView.ItemTemplate>
-                <DataTemplate DataType="{x:Type vm:ComicCoverItem}">
-                    <Border BorderBrush="LightGray"
-                            BorderThickness="1"
-                            Margin="4"
-                            Padding="4"
-                            Width="180"
-                            Cursor="Hand"
-                            ToolTipService.ShowDuration="15000"
-                            Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}">
-                        <Border.ToolTip>
-                            <TextBlock Text="{Binding ArchivePath}"
-                                       TextWrapping="Wrap"
-                                       MaxWidth="400" />
-                        </Border.ToolTip>
-                        <Border.ContextMenu>
-                            <ContextMenu>
-                                <MenuItem Header="Copy path"
-                                          Command="{Binding PlacementTarget.Tag.CopyArchivePathCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
-                                          CommandParameter="{Binding ArchivePath}" />
-                            </ContextMenu>
-                        </Border.ContextMenu>
-                        <Border.InputBindings>
-                            <MouseBinding Gesture="LeftClick"
-                                          Command="{Binding DataContext.OpenComicCommand, RelativeSource={RelativeSource AncestorType=ListView}}"
-                                          CommandParameter="{Binding ArchivePath}" />
-                        </Border.InputBindings>
+                    <!-- Directory selection -->
+                    <GroupBox Header="1. Select comic archive directory" Grid.Row="0" Margin="0,0,0,5">
                         <Grid>
-                            <Grid.RowDefinitions>
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="*" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                                <RowDefinition Height="Auto" />
-                            </Grid.RowDefinitions>
-                            <!-- Similarity score -->
-                            <TextBlock Grid.Row="0"
-                                       Text="{Binding SimilarityText}"
-                                       FontWeight="Bold"
-                                       Foreground="{Binding SimilarityScore, Converter={StaticResource ScoreToBrushConverter}}"
-                                       HorizontalAlignment="Center"
-                                       Margin="0,0,0,4" />
-                            <!-- Cover image -->
-                            <Image Grid.Row="1"
-                                   Source="{Binding Thumbnail}"
-                                   MaxHeight="240"
-                                   Stretch="Uniform"
-                                   VerticalAlignment="Center"
-                                   HorizontalAlignment="Center" />
-                            <!-- File name -->
-                            <TextBlock Grid.Row="2"
-                                       Text="{Binding ArchiveFileName}"
-                                       TextWrapping="WrapWithOverflow"
-                                       TextAlignment="Center"
-                                       FontSize="11"
-                                       TextTrimming="CharacterEllipsis"
-                                       Margin="0,4,0,0" />
-                            <!-- Page label -->
-                            <TextBlock Grid.Row="3"
-                                       Text="{Binding PageLabel}"
-                                       FontSize="10"
-                                       Foreground="Gray"
-                                       TextAlignment="Center"
-                                       Margin="0,2,0,0" />
-                            <!-- Click hint -->
-                            <TextBlock Grid.Row="4"
-                                       Text="(click to open)"
-                                       FontSize="10"
-                                       Foreground="Gray"
-                                       HorizontalAlignment="Center" />
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding DirectoryPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     VerticalAlignment="Center"
+                                     Margin="0,0,5,0" />
+                            <Button Grid.Column="1"
+                                    Content="Browse..."
+                                    Command="{Binding BrowseDirectoryCommand}"
+                                    Padding="10,5" />
                         </Grid>
-                    </Border>
-                </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
+                    </GroupBox>
 
-        <!-- Status bar -->
-        <StatusBar Grid.Row="7">
+                    <!-- Query input and action buttons -->
+                    <GroupBox Header="2. Search query" Grid.Row="1" Margin="0,0,0,5">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox Grid.Column="0"
+                                     Text="{Binding QueryText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     VerticalAlignment="Center"
+                                     Margin="0,0,5,0" />
+                            <Button Grid.Column="1"
+                                    Content="Search"
+                                    Command="{Binding SearchCommand}"
+                                    IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBoolConverter}}"
+                                    Padding="15,5"
+                                    Margin="0,0,5,0" />
+                            <Button Grid.Column="2"
+                                    Content="Cancel"
+                                    Command="{Binding CancelCommand}"
+                                    IsEnabled="{Binding IsBusy}"
+                                    Padding="15,5" />
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- Similarity threshold with tooltip -->
+                    <GroupBox Header="3. Similarity threshold" Grid.Row="2" Margin="0,0,0,5">
+                        <GroupBox.ToolTip>
+                            <TextBlock>
+                                Minimum similarity score: results below this threshold are hidden.
+                                <LineBreak />
+                                Values range from 0% (show all) to 100% (exact match only).
+                            </TextBlock>
+                        </GroupBox.ToolTip>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Min:"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,5,0" />
+                            <controls:NumericUpDownControl Grid.Column="1"
+                                                           Minimum="0"
+                                                           Maximum="1"
+                                                           Step="0.01"
+                                                           Format="P0"
+                                                           Value="{Binding SimilarityThreshold, Mode=TwoWay}"
+                                                           VerticalAlignment="Center"
+                                                           Margin="0,0,5,0" />
+                            <TextBlock Grid.Column="2"
+                                       Text="{Binding SimilarityThreshold, StringFormat=P0}"
+                                       VerticalAlignment="Center"
+                                       Width="45"
+                                       TextAlignment="Center" />
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- Search mode -->
+                    <GroupBox Header="4. Search mode" Grid.Row="3" Margin="0,0,0,5">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Grid.Column="0"
+                                       Text="Mode:"
+                                       VerticalAlignment="Center"
+                                       Margin="0,0,5,0" />
+                            <ComboBox Grid.Column="1"
+                                      ItemsSource="{Binding SearchModes}"
+                                      SelectedIndex="{Binding SelectedModeIndex, Mode=TwoWay}"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,5,0" />
+                        </Grid>
+                    </GroupBox>
+
+                    <!-- Progress bar -->
+                    <Grid Grid.Row="4" Margin="0,0,0,5">
+                        <ProgressBar Minimum="0"
+                                     Maximum="{Binding ProgressTotal, Mode=OneWay}"
+                                     Value="{Binding ProgressCurrent, Mode=OneWay}"
+                                     Height="20"
+                                     Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisConverter}}"
+                                     IsIndeterminate="{Binding ProgressTotal, Converter={StaticResource ZeroToBoolConverter}}" />
+                        <TextBlock HorizontalAlignment="Right"
+                                   VerticalAlignment="Center"
+                                   Visibility="{Binding IsBusy, Converter={StaticResource BoolToVisConverter}}">
+                            <TextBlock.Text>
+                                <MultiBinding StringFormat="{}{0} / {1}">
+                                    <Binding Path="ProgressCurrent"/>
+                                    <Binding Path="ProgressTotal"/>
+                                </MultiBinding>
+                            </TextBlock.Text>
+                        </TextBlock>
+                    </Grid>
+                    <StackPanel Grid.Row="5" Margin="0,0,0,5">
+                        <TextBlock Text="{Binding StatusMessage}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   TextWrapping="Wrap"
+                                   Visibility="{Binding StatusMessage, Converter={StaticResource NonEmptyStringToVisibilityConverter}}"
+                                   Margin="0,0,0,5" />
+
+                        <!-- Archive diagnostics collected during the search (container mismatches,
+                             bulk fallbacks). Visible only while it has entries. -->
+                        <GroupBox Header="Archive notes"
+                                  Margin="0,0,0,2"
+                                  Visibility="{Binding ArchiveNotesCount, Converter={StaticResource CountToVisConverter}}">
+                            <ListBox ItemsSource="{Binding ArchiveNotes}"
+                                     Height="72"
+                                     FontSize="11"
+                                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                                     Background="Transparent"
+                                     BorderThickness="0">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <TextBlock Text="{Binding}" Foreground="OrangeRed" TextWrapping="Wrap" />
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </GroupBox>
+                    </StackPanel>
+                </Grid>
+            </TabItem>
+
+            <!-- ────────────────────────────── Results panel ────────────────────────────── -->
+            <TabItem Header="{Binding ResultsCountText}">
+                <Grid Margin="5">
+                    <!-- Results list -->
+                    <ListView ItemsSource="{Binding Results}"
+                              VirtualizingPanel.ScrollUnit="Pixel"
+                              ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListView.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal" />
+                            </ItemsPanelTemplate>
+                        </ListView.ItemsPanel>
+                        <ListView.ItemTemplate>
+                            <DataTemplate DataType="{x:Type vm:ComicCoverItem}">
+                                <Border BorderBrush="LightGray"
+                                        BorderThickness="1"
+                                        Margin="4"
+                                        Padding="4"
+                                        Width="180"
+                                        Cursor="Hand"
+                                        ToolTipService.ShowDuration="15000"
+                                        Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}">
+                                    <Border.ToolTip>
+                                        <TextBlock Text="{Binding ArchivePath}"
+                                                   TextWrapping="Wrap"
+                                                   MaxWidth="400" />
+                                    </Border.ToolTip>
+                                    <Border.ContextMenu>
+                                        <ContextMenu>
+                                            <MenuItem Header="Copy path"
+                                                      Command="{Binding PlacementTarget.Tag.CopyArchivePathCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding ArchivePath}" />
+                                        </ContextMenu>
+                                    </Border.ContextMenu>
+                                    <Border.InputBindings>
+                                        <MouseBinding Gesture="LeftClick"
+                                                      Command="{Binding DataContext.OpenComicCommand, RelativeSource={RelativeSource AncestorType=ListView}}"
+                                                      CommandParameter="{Binding ArchivePath}" />
+                                    </Border.InputBindings>
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="*" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <!-- Similarity score -->
+                                        <TextBlock Grid.Row="0"
+                                                   Text="{Binding SimilarityText}"
+                                                   FontWeight="Bold"
+                                                   Foreground="{Binding SimilarityScore, Converter={StaticResource ScoreToBrushConverter}}"
+                                                   HorizontalAlignment="Center"
+                                                   Margin="0,0,0,4" />
+                                        <!-- Cover image -->
+                                        <Image Grid.Row="1"
+                                               Source="{Binding Thumbnail}"
+                                               MaxHeight="240"
+                                               Stretch="Uniform"
+                                               VerticalAlignment="Center"
+                                               HorizontalAlignment="Center" />
+                                        <!-- File name -->
+                                        <TextBlock Grid.Row="2"
+                                                   Text="{Binding ArchiveFileName}"
+                                                   TextWrapping="WrapWithOverflow"
+                                                   TextAlignment="Center"
+                                                   FontSize="11"
+                                                   TextTrimming="CharacterEllipsis"
+                                                   Margin="0,4,0,0" />
+                                        <!-- Page label -->
+                                        <TextBlock Grid.Row="3"
+                                                   Text="{Binding PageLabel}"
+                                                   FontSize="10"
+                                                   Foreground="Gray"
+                                                   TextAlignment="Center"
+                                                   Margin="0,2,0,0" />
+                                        <!-- Click hint -->
+                                        <TextBlock Grid.Row="4"
+                                                   Text="(click to open)"
+                                                   FontSize="10"
+                                                   Foreground="Gray"
+                                                   HorizontalAlignment="Center" />
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+
+                    <!-- Placeholder shown while the results list is empty -->
+                    <TextBlock Text="No results yet — run a search to see matches here."
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"
+                               Foreground="Gray"
+                               Visibility="{Binding HasResults, Converter={StaticResource InvertBoolVisConverter}}" />
+                </Grid>
+            </TabItem>
+        </TabControl>
+
+        <!-- Status bar (shared by both inner panels) -->
+        <StatusBar Grid.Row="1">
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusMessage}" />
             </StatusBarItem>
