@@ -37,6 +37,10 @@ internal sealed class SqliteConnectionPool : IDisposable
         }
 
         var newConn = new SqliteConnection(_connectionString);
+        // 5 minutes of busy-waiting: the background legacy migration can hold the write
+        // lock for a while on a large cache, and other writers (cache flushes) should
+        // wait for it instead of failing with "database is locked".
+        newConn.DefaultTimeout = 300;
         newConn.Open();
         Interlocked.Increment(ref _totalCreated);
         return newConn;

@@ -68,14 +68,22 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
 - Progress bar + processing log
 
 ### Analyze (Tab 4)
-- **Auto-Cluster**: k-means clustering without predefined labels
+- **Auto-Cluster**: k-means clustering without predefined labels (needs the MobileNetV2 model)
   - Auto-determine cluster count (silhouette score)
   - Editable cluster names
-  - Sort files into clusters
-- **By Tags**: CLIP zero-shot tag generation
+  - "Sort by Clusters" copies images into one subfolder per cluster
+- **By Tags**: CLIP zero-shot tag generation (needs the CLIP ViT-B/32 model)
   - Multi-line candidate tag input
-  - Image preview with tag checkboxes
+  - Top-K is chosen **only from your candidate list** — CLIP cannot invent labels,
+    so include every topic you care about (e.g. `autumn`) plus contrasting tags
+    (e.g. `winter, spring, summer`) for meaningful scores
+  - Image preview with tag checkboxes; tags above the confidence threshold are pre-checked
   - Edit and filter tags before sorting
+  - "Sort by Tags" copies each image into one subfolder per checked tag
+- Only the top level of the source folder is scanned — images in subfolders are ignored
+- Sort buttons **copy** (originals stay in place) and never clean target subfolders,
+  so stale copies from previous runs may remain
+- Cancel takes effect between images; By Tags keeps the partial results
 
 ### Comic Cover Search (Tab 6)
 - Search CBZ/CBR comic archives by semantic description
@@ -83,6 +91,29 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
 - Results ranked by cosine similarity (raw CLIP score)
 - Adjustable similarity threshold (default 0.25)
 - Score distribution shown in status bar
+
+### Search Image (Tab 7)
+- Search plain image files (JPG/JPEG/PNG/BMP/TIFF/WebP) by semantic description
+- Multiple source directories, scanned top-level or with subfolders
+  ("Recurse subfolders", persisted)
+- Uses CLIP ViT-B/32 ONNX model. Image encoding is **batched exactly like Comic Search**:
+  the "ClipViTB32" per-file vector cache (one row per photo, keyed by file path +
+  mtime + size) is probed in a single batched round-trip; cache hits are scored
+  without reading the file, cache misses are encoded in GPU batches
+  (Settings → GPU Batch Size, default 32) and saved back to the same cache — so a
+  second search of the same directory is a near-instant cache probe, and embeddings
+  computed by Analyze/By Tags are reused without re-encoding
+- Results ranked by cosine similarity, adjustable threshold (default 25%)
+- Directories, last 10 query phrases, threshold and the recursion option are
+  persisted between app runs
+- Tile grid with thumbnails loaded on demand; left click opens the image in the
+  default viewer, right click → copy path; files that fail to decode are skipped
+  and listed in the status line
+- "Copy results images…" (tab menu) copies all result files into a chosen folder
+- Cancel takes effect between GPU batches; everything encoded so far is already scored
+  into the results AND already saved to the per-file cache (chunk-by-chunk, exactly
+  like Comic Search), so a cancelled run still warms the cache — the next search
+  resumes from the cache instead of starting over
 
 ### Settings (Tab 5)
 - ONNX Runtime thread count

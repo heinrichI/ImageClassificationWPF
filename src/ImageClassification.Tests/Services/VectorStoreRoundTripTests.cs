@@ -1,4 +1,6 @@
+using System.Text;
 using ImageClassification.VectorStore;
+using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
@@ -188,5 +190,85 @@ public sealed class VectorStoreRoundTripTests : IDisposable
         var readBack = await store.GetAsync(Model, AllPagesKey0, LastModified, FileSize);
 
         Assert.Equal(second, readBack);
+    }
+
+    /// <summary>
+    /// Regression guard for the SQLite host-parameter limit (32766 since 3.32; 999
+    /// before): a probe of MORE entries than the limit must not throw "too many SQL
+    /// variables". Such a probe is impossible as a single IN (...) list — the store
+    /// loads the probe set into a temp table and runs one join instead, so 33k+ entries
+    /// must come back with the exact same hit / stale / missing classification as small
+    /// probes.
+    /// </summary>
+    [Fact]
+    public async Task GetBatchAsync_MoreEntriesThanSqliteVariableLimit_ClassifiesEveryEntry()
+    {
+        const int total = 33_000; // > 32766, SQLite's modern host-parameter limit
+
+        using var store = CreateStore(); // Initialize() creates the tables in _dbPath
+
+        // Seed the cache: one 4-dim vector row per path (the vector is shared, so the
+        // blob is a single bound parameter reused across every row of each INSERT).
+        // Paths where i % 100 == 50 are deliberately left UNseeded → "missing".
+        var vector = MakeVector(4);
+        var blob = new byte[4 + 4 * vector.Length];
+        BitConverter.TryWriteBytes(blob.AsSpan(), vector.Length); // dim, LE on the target platform
+        for (var i = 0; i < vector.Length; i++)
+            BitConverter.TryWriteBytes(blob.AsSpan(4 + i * 4), vector[i]);
+
+        using (var raw = new SqliteConnection($"Data Source={_dbPath}"))
+        {
+            raw.Open();
+            using var tx = raw.BeginTransaction();
+            using var cmd = raw.CreateCommand();
+            cmd.Transaction = tx;
+            cmd.Parameters.AddWithValue("@mn", Model);
+            cmd.Parameters.AddWithValue("@lm", LastModified.ToString("O"));
+            cmd.Parameters.AddWithValue("@fs", FileSize);
+            cmd.Parameters.AddWithValue("@emb", blob);
+            cmd.Parameters.AddWithValue("@ca", LastModified.ToString("O"));
+
+            const int rowsPerStatement = 500; // 5 shared variables per statement — no limit risk
+            for (var start = 0; start < total; start += rowsPerStatement)
+            {
+                var parts = new List<string>();
+                for (var i = 0; i < rowsPerStatement && start + i < total; i++)
+                {
+                    var idx = start + i;
+                    if (idx % 100 == 50)
+                        continue; // unseeded on purpose
+                    parts.Add($"(@mn, 't/p{idx}.jpg', @lm, @fs, @emb, @ca)");
+                }
+                if (parts.Count == 0)
+                    continue;
+
+                cmd.CommandText = "INSERT OR IGNORE INTO embeddings " +
+                    "(model_name, file_path, last_modified, file_size, embedding, created_at) " +
+                    $"VALUES {string.Join(",", parts)}";
+                await cmd.ExecuteNonQueryAsync();
+            }
+            tx.Commit();
+        }
+
+        // Probe MORE paths than SQLite allows variables for. Where i % 100 == 75 the
+        // file is "touched" after caching (newer timestamp) → must come back stale.
+        var probe = new List<(string, DateTime, long)>(total);
+        for (var i = 0; i < total; i++)
+        {
+            var lm = i % 100 == 75 ? LastModified.AddHours(1) : LastModified;
+            probe.Add(($"t/p{i}.jpg", lm, FileSize));
+        }
+
+        var results = await store.GetBatchAsync(Model, probe); // would throw on a single-IN implementation
+
+        Assert.Equal(total, results.Count);
+        for (var i = 0; i < total; i++)
+        {
+            var value = results[$"t/p{i}.jpg"];
+            if (i % 100 == 50 || i % 100 == 75)
+                Assert.Null(value); // missing or stale → re-encode
+            else
+                Assert.Equal(vector, value); // fresh cache hit
+        }
     }
 }

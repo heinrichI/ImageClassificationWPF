@@ -18,6 +18,7 @@ public partial class SettingsViewModel : ObservableObject
     private int _lastGpuBatch;
     private int _lastWidth;
     private int _lastMaxCached;
+    private int _lastMaxPreviews;
 
     public SettingsViewModel(
         IModelDownloader downloader,
@@ -30,6 +31,7 @@ public partial class SettingsViewModel : ObservableObject
         _gpuBatchSize = _lastGpuBatch = store.GpuBatchSize;
         _thumbnailWidth = _lastWidth = store.ThumbnailWidth;
         _maxCachedThumbnails = _lastMaxCached = store.MaxCachedThumbnails;
+        _maxPreviews = _lastMaxPreviews = store.MaxPreviews;
 
         RefreshModels();
     }
@@ -49,6 +51,13 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty] private int _thumbnailWidth;
     [ObservableProperty] private int _maxCachedThumbnails;
 
+    /// <summary>
+    /// Maximum number of result previews (thumbnails) to load: only the top N results
+    /// get a real preview, the rest show placeholders (all results are still listed).
+    /// 0 = no limit. Applied from the next search.
+    /// </summary>
+    [ObservableProperty] private int _maxPreviews;
+
     public ObservableCollection<ModelDownloadInfo> AvailableModels { get; } = new();
 
     partial void OnOnnxThreadCountChanged(int value)
@@ -60,7 +69,7 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _lastThreadCount = value;
-        _store.Save(value, _gpuBatchSize, _thumbnailWidth, _maxCachedThumbnails);
+        _store.Save(value, _gpuBatchSize, _thumbnailWidth, _maxCachedThumbnails, _maxPreviews, _store.SearchMode);
     }
 
     partial void OnGpuBatchSizeChanged(int value)
@@ -72,7 +81,7 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _lastGpuBatch = value;
-        _store.Save(_onnxThreadCount, value, _thumbnailWidth, _maxCachedThumbnails);
+        _store.Save(_onnxThreadCount, value, _thumbnailWidth, _maxCachedThumbnails, _maxPreviews, _store.SearchMode);
     }
 
     partial void OnThumbnailWidthChanged(int value)
@@ -84,7 +93,7 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _lastWidth = value;
-        _store.Save(_onnxThreadCount, _gpuBatchSize, value, _maxCachedThumbnails);
+        _store.Save(_onnxThreadCount, _gpuBatchSize, value, _maxCachedThumbnails, _maxPreviews, _store.SearchMode);
     }
 
     partial void OnMaxCachedThumbnailsChanged(int value)
@@ -96,7 +105,19 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _lastMaxCached = value;
-        _store.Save(_onnxThreadCount, _gpuBatchSize, _thumbnailWidth, value);
+        _store.Save(_onnxThreadCount, _gpuBatchSize, _thumbnailWidth, value, _maxPreviews, _store.SearchMode);
+    }
+
+    partial void OnMaxPreviewsChanged(int value)
+    {
+        if (value < 0 || value > 100_000)
+        {
+            _maxPreviews = _lastMaxPreviews;
+            return;
+        }
+
+        _lastMaxPreviews = value;
+        _store.Save(_onnxThreadCount, _gpuBatchSize, _thumbnailWidth, _maxCachedThumbnails, value, _store.SearchMode);
     }
 
     [RelayCommand]

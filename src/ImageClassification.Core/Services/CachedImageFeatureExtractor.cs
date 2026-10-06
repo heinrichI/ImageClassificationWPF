@@ -46,7 +46,8 @@ internal sealed class CachedImageFeatureExtractor : IImageFeatureExtractor
     }
 
     public async Task<List<ImageFeatures>> ExtractBatchAsync(
-        List<string> imagePaths, IProgress<int>? progress = null)
+        List<string> imagePaths, IProgress<int>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         if (imagePaths.Count == 0)
             return new List<ImageFeatures>();
@@ -100,7 +101,7 @@ internal sealed class CachedImageFeatureExtractor : IImageFeatureExtractor
                 "ExtractBatch: {MissCount}/{TotalCount} cache misses ({ModelName})",
                 missPaths.Count, imagePaths.Count, ModelName);
 
-            var missResults = await _inner.ExtractBatchAsync(missPaths, progress)
+            var missResults = await _inner.ExtractBatchAsync(missPaths, progress, cancellationToken)
                 .ConfigureAwait(false);
 
             // Save to cache

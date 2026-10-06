@@ -10,10 +10,11 @@
         Title="Image Classification" Height="720" Width="1100"
         WindowStartupLocation="CenterScreen">
     <Window.TaskbarItemInfo>
-        <!-- Progress overlay on the Windows taskbar button while a comic search runs.
-             Note: in .NET WPF the value property is named ProgressValue (.NET Framework used Value). -->
-        <TaskbarItemInfo ProgressState="{Binding ComicCoverSearch.TaskbarProgressState}"
-                         ProgressValue="{Binding ComicCoverSearch.TaskbarProgressValue}" />
+        <!-- Progress overlay on the Windows taskbar button while a search runs (comic or
+             image search); MainViewModel merges both tabs' state. Note: in .NET WPF the
+             value property is named ProgressValue (.NET Framework used Value). -->
+        <TaskbarItemInfo ProgressState="{Binding TaskbarProgressState}"
+                         ProgressValue="{Binding TaskbarProgressValue}" />
     </Window.TaskbarItemInfo>
     <DockPanel>
         <Menu DockPanel.Dock="Top"
@@ -63,6 +64,9 @@
             </TabItem>
             <TabItem Header="  Comic Search  ">
                 <views:ComicCoverSearchView DataContext="{Binding ComicCoverSearch}" />
+            </TabItem>
+            <TabItem Header="  Search Image  ">
+                <views:SearchImageView DataContext="{Binding SearchImage}" />
             </TabItem>
         </TabControl>
         </Grid>

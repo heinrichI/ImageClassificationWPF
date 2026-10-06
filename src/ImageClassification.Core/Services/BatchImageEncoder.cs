@@ -13,7 +13,7 @@ namespace ImageClassification.Core.Services;
 /// Preprocesses images in parallel on CPU (ImageSharp), then runs batched ONNX
 /// inference on GPU. No caching logic — caller is responsible for cache management.
 /// </summary>
-internal sealed class BatchImageEncoder : IDisposable
+internal sealed class BatchImageEncoder : IBatchImageEncoder
 {
     private const int EmbeddingDim = 512;
 

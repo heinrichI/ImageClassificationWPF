@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Models;
 
 namespace ImageClassification.Core.Services;
@@ -29,7 +30,8 @@ internal sealed class ClipTagService : ITagService
         List<string> imagePaths,
         string[] candidateTags,
         int topK = 5,
-        IProgress<int>? progress = null)
+        IProgress<int>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         if (imagePaths.Count == 0 || candidateTags.Length == 0)
             return new List<ImageTagResult>();
@@ -45,52 +47,53 @@ internal sealed class ClipTagService : ITagService
         }
 
         var results = new ConcurrentBag<ImageTagResult>();
-        var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
+        var parallelOptions = new ParallelOptions
+        {
+            MaxDegreeOfParallelism = 4,
+            CancellationToken = cancellationToken
+        };
         int completed = 0;
 
-        await Parallel.ForEachAsync(imagePaths, parallelOptions, async (imagePath, ct) =>
+        try
         {
-            try
+            await Parallel.ForEachAsync(imagePaths, parallelOptions, async (imagePath, ct) =>
             {
-                var imageEmbedding = await _clipEncoder.EncodeImageAsync(imagePath, ct)
-                    .ConfigureAwait(false);
-
-                var tagScores = new List<(string Tag, float Score)>();
-                foreach (var (tag, textEmb) in textEmbeddings)
+                try
                 {
-                    float similarity = CosineSimilarity(imageEmbedding, textEmb);
-                    tagScores.Add((tag, similarity));
+                    var imageEmbedding = await _clipEncoder.EncodeImageAsync(imagePath, ct)
+                        .ConfigureAwait(false);
+
+                    var tagScores = new List<(string Tag, float Score)>();
+                    foreach (var (tag, textEmb) in textEmbeddings)
+                    {
+                        float similarity = VectorMath.CosineSimilarity(imageEmbedding, textEmb);
+                        tagScores.Add((tag, similarity));
+                    }
+
+                    var topTags = tagScores
+                        .OrderByDescending(t => t.Score)
+                        .Take(topK)
+                        .ToList();
+
+                    results.Add(new ImageTagResult
+                    {
+                        FilePath = imagePath,
+                        Tags = topTags
+                    });
                 }
+                catch { /* Skip unprocessable images */ }
 
-                var topTags = tagScores
-                    .OrderByDescending(t => t.Score)
-                    .Take(topK)
-                    .ToList();
-
-                results.Add(new ImageTagResult
-                {
-                    FilePath = imagePath,
-                    Tags = topTags
-                });
-            }
-            catch { /* Skip unprocessable images */ }
-
-            var count = Interlocked.Increment(ref completed);
-            progress?.Report(count);
-        }).ConfigureAwait(false);
+                var count = Interlocked.Increment(ref completed);
+                progress?.Report(count);
+            }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancellation takes effect between images: return whatever finished so far
+            // so the caller can show partial results.
+        }
 
         return results.OrderBy(r => imagePaths.IndexOf(r.FilePath)).ToList();
-    }
-
-    private static float CosineSimilarity(float[] a, float[] b)
-    {
-        float dot = 0;
-        int len = Math.Min(a.Length, b.Length);
-        for (int i = 0; i < len; i++)
-        {
-            dot += a[i] * b[i];
-        }
-        return dot; // Already L2-normalized, so dot product = cosine similarity
     }
 
     public void Dispose()

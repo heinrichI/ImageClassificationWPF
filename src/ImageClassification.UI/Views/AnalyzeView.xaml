@@ -21,9 +21,11 @@
             <!-- Mode selector -->
             <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                 <RadioButton Content="Auto-Cluster" IsChecked="{Binding IsClusterMode}" Margin="0,0,16,0"
-                             GroupName="AnalyzeMode"/>
+                             GroupName="AnalyzeMode"
+                             ToolTip="k-means clustering by visual features, no labels. You name the clusters, then Sort by Clusters."/>
                 <RadioButton Content="By Tags (CLIP)" IsChecked="{Binding IsClusterMode, Converter={StaticResource InvertBoolConverter}}"
-                             GroupName="AnalyzeMode"/>
+                             GroupName="AnalyzeMode"
+                             ToolTip="CLIP zero-shot: every image is scored against your candidate tags. Review the checked tags, then Sort by Tags."/>
             </StackPanel>
 
             <!-- Source Directory -->
@@ -33,27 +35,35 @@
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                    <TextBlock Text="Source Directory:" Margin="0,0,0,4"/>
+                    <TextBlock Text="Source Directory:" Margin="0,0,0,4"
+                               ToolTip="Folder with images (jpg, jpeg, png, bmp, tiff, webp). Only the top level of the folder is scanned — subfolders are ignored."/>
                     <TextBox Text="{Binding SourceDirectory, UpdateSourceTrigger=PropertyChanged}"/>
                 </StackPanel>
-                <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseSourceDirectoryCommand}" VerticalAlignment="Bottom" Padding="12,6"/>
+                <Button Grid.Column="1" Content="Browse" Command="{Binding BrowseSourceDirectoryCommand}" VerticalAlignment="Bottom" Padding="12,6"
+                        ToolTip="Select the folder with images"/>
             </Grid>
 
             <!-- Cluster Mode Settings -->
             <StackPanel Visibility="{Binding IsClusterMode, Converter={StaticResource BoolToVisConverter}}">
-                <CheckBox Content="Auto-detect number of clusters" IsChecked="{Binding AutoDetectClusters}" Margin="0,4"/>
+                <TextBlock Margin="0,0,0,6" Foreground="Gray" TextWrapping="Wrap"
+                           Text="Auto-Cluster: groups images by visual similarity (k-means, no labels). The app suggests cluster names — edit them, then 'Sort by Clusters' copies images into one folder per cluster. Needs the MobileNetV2 model."/>
+                <CheckBox Content="Auto-detect number of clusters" IsChecked="{Binding AutoDetectClusters}" Margin="0,4"
+                          ToolTip="Let the app choose the cluster count (silhouette score)"/>
                 <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                    <TextBlock Text="Number of clusters:" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                    <TextBox Text="{Binding NumClusters, UpdateSourceTrigger=PropertyChanged}" Width="60" Margin="0,0,8,0"/>
+                    <TextBlock Text="Number of clusters:" VerticalAlignment="Center" Margin="0,0,8,0" ToolTip="Used when auto-detect is off"/>
+                    <TextBox Text="{Binding NumClusters, UpdateSourceTrigger=PropertyChanged}" Width="60" Margin="0,0,8,0" ToolTip="Used when auto-detect is off"/>
                     <TextBlock Text="{Binding DetectedKText}" Foreground="Gray" VerticalAlignment="Center"/>
                 </StackPanel>
             </StackPanel>
 
             <!-- Tag Mode Settings -->
             <StackPanel Visibility="{Binding IsClusterMode, Converter={StaticResource InvertBoolConverter}}">
+                <TextBlock Margin="0,0,0,6" Foreground="Gray" TextWrapping="Wrap"
+                           Text="By Tags (CLIP): zero-shot, no training — every image is scored against the candidate tags below (e.g. 'autumn'). Top-K is chosen from that list only. Review the checked tags, then 'Sort by Tags' copies images into one folder per tag. Needs the CLIP ViT-B/32 model."/>
                 <TextBlock Text="Candidate Tags (comma-separated):" Margin="0,0,0,4"/>
                 <TextBox Text="{Binding CandidateTags, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True"
-                         TextWrapping="Wrap" Height="60" VerticalScrollBarVisibility="Auto" Margin="0,0,0,8"/>
+                         TextWrapping="Wrap" Height="60" VerticalScrollBarVisibility="Auto" Margin="0,0,0,8"
+                         ToolTip="Tags to look for — comma-, semicolon- or line-separated. Top-K is chosen from this list only, so include every topic you care about (e.g. autumn)."/>
 
                 <Grid>
                     <Grid.ColumnDefinitions>
@@ -61,12 +71,12 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Margin="0,0,8,0">
-                        <TextBlock Text="Top-K Tags:" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding TopK, UpdateSourceTrigger=PropertyChanged}"/>
+                        <TextBlock Text="Top-K Tags:" Margin="0,0,0,4" ToolTip="How many best-matching tags to show per image"/>
+                        <TextBox Text="{Binding TopK, UpdateSourceTrigger=PropertyChanged}" ToolTip="How many best-matching tags to show per image"/>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Margin="8,0,0,0">
-                        <TextBlock Text="Confidence Threshold:" Margin="0,0,0,4"/>
-                        <TextBox Text="{Binding TagConfidenceThreshold, UpdateSourceTrigger=PropertyChanged}"/>
+                        <TextBlock Text="Confidence Threshold:" Margin="0,0,0,4" ToolTip="Tags with a score above this value are pre-checked in the results"/>
+                        <TextBox Text="{Binding TagConfidenceThreshold, UpdateSourceTrigger=PropertyChanged}" ToolTip="Tags with a score above this value are pre-checked in the results"/>
                     </StackPanel>
                 </Grid>
             </StackPanel>
@@ -75,15 +85,19 @@
             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                 <Button Content="Analyze" Command="{Binding AnalyzeCommand}"
                         IsEnabled="{Binding IsProcessing, Converter={StaticResource InvertBoolConverter}}"
-                        Padding="16,6" Margin="0,0,8,0"/>
+                        Padding="16,6" Margin="0,0,8,0"
+                        ToolTip="Run the analysis on the images in the source folder. Nothing is written to disk — results appear in the list below."/>
                 <Button Content="Sort by Clusters" Command="{Binding SortByClustersCommand}"
                         IsEnabled="{Binding IsProcessing, Converter={StaticResource InvertBoolConverter}}"
-                        Padding="16,6" Margin="0,0,8,0"/>
+                        Padding="16,6" Margin="0,0,8,0"
+                        ToolTip="Copy every image into a subfolder named after its cluster (e.g. 'autumn'). The originals stay in the source folder. Needs an Auto-Cluster run first; subfolders are not cleaned, so stale copies may remain."/>
                 <Button Content="Sort by Tags" Command="{Binding SortByTagsCommand}"
                         IsEnabled="{Binding IsProcessing, Converter={StaticResource InvertBoolConverter}}"
-                        Padding="16,6" Margin="0,0,8,0"/>
+                        Padding="16,6" Margin="0,0,8,0"
+                        ToolTip="Copy each image into a subfolder for every CHECKED tag (an image can go into several folders). The originals stay in the source folder. Needs a By Tags run first; subfolders are not cleaned, so stale copies may remain."/>
                 <Button Content="Cancel" Command="{Binding CancelCommand}"
-                        IsEnabled="{Binding IsProcessing}" Padding="16,6"/>
+                        IsEnabled="{Binding IsProcessing}" Padding="16,6"
+                        ToolTip="Stop the analysis. Takes effect between images; already processed images remain in the results (By Tags mode)."/>
             </StackPanel>
         </StackPanel>
 
@@ -105,7 +119,8 @@
                                     </StackPanel>
                                     <TextBlock Text="{Binding ImagePaths, Converter={StaticResource PathListConverter}}"
                                                Foreground="#666" TextWrapping="Wrap" Margin="0,4,0,0"
-                                               MaxHeight="40"/>
+                                               MaxHeight="40"
+                                               ToolTip="Images in this cluster (list may be clipped)"/>
                                 </StackPanel>
                             </Border>
                         </DataTemplate>
@@ -155,10 +170,11 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <ProgressBar Grid.Column="0" Value="{Binding ProgressPercent}" Maximum="100" Height="4" VerticalAlignment="Center"/>
-            <TextBlock Grid.Column="1" Text="{Binding CurrentFileText}" Margin="12,0,0,0" Foreground="Gray"/>
-            <TextBlock Grid.Column="1" Text="{Binding StatusText}" Margin="12,0,0,0" Foreground="Gray"/>
+            <TextBlock Grid.Column="1" Text="{Binding StatusText}" Margin="12,0,0,0" Foreground="Gray" VerticalAlignment="Center"/>
+            <TextBlock Grid.Column="2" Text="{Binding CurrentFileText}" Margin="12,0,0,0" Foreground="Gray" VerticalAlignment="Center"/>
         </Grid>
     </Grid>
 </UserControl>

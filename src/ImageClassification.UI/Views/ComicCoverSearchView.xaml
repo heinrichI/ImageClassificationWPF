@@ -5,6 +5,9 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              xmlns:vm="clr-namespace:ImageClassification.UI.ViewModels"
              xmlns:controls="clr-namespace:ImageClassification.UI.Views.Controls"
+             xmlns:vwp="clr-namespace:WpfToolkit.Controls;assembly=VirtualizingWrapPanel"
+             xmlns:i="http://schemas.microsoft.com/xaml/behaviors"
+             xmlns:bh="clr-namespace:ImageClassification.UI.Behaviors"
              mc:Ignorable="d"
              d:DataContext="{d:DesignInstance Type=vm:ComicCoverSearchViewModel, IsDesignTimeCreatable=False}">
     <Grid Margin="10">
@@ -32,24 +35,56 @@
                     </Grid.RowDefinitions>
 
                     <!-- Directory selection -->
-                    <GroupBox Header="1. Select comic archive directory" Grid.Row="0" Margin="0,0,0,5">
+                    <GroupBox Header="1. Select comic archive directories" Grid.Row="0" Margin="0,0,0,5">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBox Grid.Column="0"
-                                     Text="{Binding DirectoryPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     VerticalAlignment="Center"
-                                     Margin="0,0,5,0" />
+                            <ItemsControl Grid.Column="0"
+                                          ItemsSource="{Binding SearchDirectories}"
+                                          MaxHeight="120"
+                                          Margin="0,0,5,0">
+                                <ItemsControl.Template>
+                                    <ControlTemplate TargetType="ItemsControl">
+                                        <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                            <ItemsPresenter />
+                                        </ScrollViewer>
+                                    </ControlTemplate>
+                                </ItemsControl.Template>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0"
+                                                       Text="{Binding}"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding}"
+                                                       VerticalAlignment="Center"
+                                                       Margin="0,1" />
+                                            <Button Grid.Column="1"
+                                                    Content="✕"
+                                                    Width="24"
+                                                    Margin="4,1,0,1"
+                                                    ToolTip="Remove directory"
+                                                    Command="{Binding DataContext.RemoveDirectoryCommand, RelativeSource={RelativeSource AncestorType=ItemsControl}}"
+                                                    CommandParameter="{Binding}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
                             <Button Grid.Column="1"
-                                    Content="Browse..."
-                                    Command="{Binding BrowseDirectoryCommand}"
-                                    Padding="10,5" />
+                                    Content="Add..."
+                                    Command="{Binding AddDirectoryCommand}"
+                                    Padding="10,5"
+                                    VerticalAlignment="Center" />
                         </Grid>
                     </GroupBox>
 
-                    <!-- Query input and action buttons -->
+                    <!-- Query input (editable combo = input box + history dropdown) and action buttons -->
                     <GroupBox Header="2. Search query" Grid.Row="1" Margin="0,0,0,5">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -57,10 +92,16 @@
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBox Grid.Column="0"
-                                     Text="{Binding QueryText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     VerticalAlignment="Center"
-                                     Margin="0,0,5,0" />
+                            <!-- IsTextSearchEnabled=FALSE: typing must not jump the selection
+                                 onto a history item (that would overwrite the typed text). -->
+                            <ComboBox Grid.Column="0"
+                                      ItemsSource="{Binding PhraseHistory}"
+                                      IsEditable="True"
+                                      IsTextSearchEnabled="False"
+                                      Text="{Binding QueryText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      SelectedItem="{Binding SelectedPhrase, Mode=TwoWay}"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,5,0" />
                             <Button Grid.Column="1"
                                     Content="Search"
                                     Command="{Binding SearchCommand}"
@@ -156,6 +197,16 @@
                                    Visibility="{Binding StatusMessage, Converter={StaticResource NonEmptyStringToVisibilityConverter}}"
                                    Margin="0,0,0,5" />
 
+                        <!-- Archive currently being processed (full path; the full value is in the tooltip) -->
+                        <TextBlock Text="{Binding CurrentFile}"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"
+                                   Foreground="Gray"
+                                   ToolTip="{Binding CurrentFile}"
+                                   Visibility="{Binding CurrentFile, Converter={StaticResource NonEmptyStringToVisibilityConverter}}"
+                                   Margin="0,0,0,5" />
+
                         <!-- Archive diagnostics collected during the search (container mismatches,
                              bulk fallbacks). Visible only while it has entries. -->
                         <GroupBox Header="Archive notes"
@@ -183,11 +234,23 @@
                 <Grid Margin="5">
                     <!-- Results list -->
                     <ListView ItemsSource="{Binding Results}"
+                              VirtualizingPanel.IsVirtualizing="True"
                               VirtualizingPanel.ScrollUnit="Pixel"
                               ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <!-- After results are issued the keyboard focus lands on this grid, so
+                             PageDown / arrows work right away (a tile selection gives the
+                             standard ListView scrolling behaviour). -->
+                        <i:Interaction.Behaviors>
+                            <bh:ListAutoFocusBehavior WatchedProperty="Results" />
+                        </i:Interaction.Behaviors>
                         <ListView.ItemsPanel>
                             <ItemsPanelTemplate>
-                                <WrapPanel Orientation="Horizontal" />
+                                <!-- Virtualizing panel: only visible cells are materialized, so
+                                     even tens of thousands of results stay smooth to scroll.
+                                     (A plain WrapPanel would silently disable virtualization
+                                     and materialize every cell at once — the old UI freeze.)
+                                     SpacingMode=None keeps the classic packed WrapPanel look. -->
+                                <vwp:VirtualizingWrapPanel SpacingMode="None" />
                             </ItemsPanelTemplate>
                         </ListView.ItemsPanel>
                         <ListView.ItemTemplate>
@@ -200,6 +263,13 @@
                                         Cursor="Hand"
                                         ToolTipService.ShowDuration="15000"
                                         Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListView}}">
+                                    <!-- The tile asks for its own thumbnail the moment it becomes
+                                         visible (the virtualized grid materializes only visible
+                                         tiles), so the LIFO pipeline always loads what is on
+                                         screen — not the top of the list. -->
+                                    <i:Interaction.Behaviors>
+                                        <bh:LoadThumbnailOnVisibleBehavior />
+                                    </i:Interaction.Behaviors>
                                     <Border.ToolTip>
                                         <TextBlock Text="{Binding ArchivePath}"
                                                    TextWrapping="Wrap"
@@ -232,10 +302,12 @@
                                                    Foreground="{Binding SimilarityScore, Converter={StaticResource ScoreToBrushConverter}}"
                                                    HorizontalAlignment="Center"
                                                    Margin="0,0,0,4" />
-                                        <!-- Cover image -->
+                                        <!-- Cover image: fixed cell height so a placeholder →
+                                             real-thumbnail swap never changes the item size
+                                             (no results-panel re-layout per thumbnail) -->
                                         <Image Grid.Row="1"
                                                Source="{Binding Thumbnail}"
-                                               MaxHeight="240"
+                                               Height="240"
                                                Stretch="Uniform"
                                                VerticalAlignment="Center"
                                                HorizontalAlignment="Center" />
@@ -280,6 +352,13 @@
         <StatusBar Grid.Row="1">
             <StatusBarItem>
                 <TextBlock Text="{Binding StatusMessage}" />
+            </StatusBarItem>
+            <!-- Live thumbnail pipeline status: which file is being read right now, decode
+                 queue depth and the loaded total (empty while idle -> hidden). -->
+            <StatusBarItem Margin="16,0,0,0">
+                <TextBlock Text="{Binding ThumbnailStatus}"
+                           Foreground="Gray"
+                           Visibility="{Binding ThumbnailStatus, Converter={StaticResource NonEmptyStringToVisibilityConverter}}" />
             </StatusBarItem>
         </StatusBar>
     </Grid>

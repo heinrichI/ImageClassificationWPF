@@ -79,6 +79,55 @@ public sealed class ImageCopyService
         return summary;
     }
 
+    /// <summary>
+    /// Copies plain image files (image search results) into <paramref name="destinationDirectory"/>.
+    /// No archive extraction is involved — the source files are copied as-is, keeping their
+    /// original names (clashes are resolved by appending " (1)" etc.). A failed copy does
+    /// not stop the run: the file is counted as skipped and the error is recorded.
+    /// </summary>
+    public async Task<CopySummary> CopyFilesAsync(
+        IEnumerable<string> sourcePaths,
+        string destinationDirectory,
+        IProgress<int>? progress = null,
+        CancellationToken ct = default)
+    {
+        if (sourcePaths is null) throw new ArgumentNullException(nameof(sourcePaths));
+        if (string.IsNullOrWhiteSpace(destinationDirectory))
+            throw new ArgumentException("Destination directory is required", nameof(destinationDirectory));
+
+        var summary = new CopySummary();
+        Directory.CreateDirectory(destinationDirectory);
+
+        var done = 0;
+        foreach (var sourcePath in sourcePaths)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            try
+            {
+                var destPath = ResolveDestinationPath(destinationDirectory, Path.GetFileName(sourcePath));
+                using var src = File.OpenRead(sourcePath);
+                using var dst = File.Create(destPath);
+                await src.CopyToAsync(dst, 81920, ct).ConfigureAwait(false);
+                summary.Copied++;
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to copy file {Path}", sourcePath);
+                summary.Skipped++;
+                summary.Errors.Add($"{Path.GetFileName(sourcePath)}: {ex.Message}");
+            }
+
+            progress?.Report(++done);
+        }
+
+        return summary;
+    }
+
     internal static string BuildFileName(ComicCoverItem item, byte[] bytes)
     {
         var baseName = Path.GetFileNameWithoutExtension(item.ArchiveFileName);

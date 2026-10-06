@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.Windows.Shell;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 
@@ -16,6 +18,7 @@ public partial class MainViewModel : ObservableObject
     public AnalyzeViewModel Analyze { get; }
     public SettingsViewModel Settings { get; }
     public ComicCoverSearchViewModel ComicCoverSearch { get; }
+    public SearchImageViewModel SearchImage { get; }
 
     public MainViewModel(
         TrainViewModel train,
@@ -23,7 +26,8 @@ public partial class MainViewModel : ObservableObject
         ClassifyViewModel classify,
         AnalyzeViewModel analyze,
         SettingsViewModel settings,
-        ComicCoverSearchViewModel comicCoverSearch)
+        ComicCoverSearchViewModel comicCoverSearch,
+        SearchImageViewModel searchImage)
     {
         Train = train;
         Evaluate = evaluate;
@@ -31,6 +35,12 @@ public partial class MainViewModel : ObservableObject
         Analyze = analyze;
         Settings = settings;
         ComicCoverSearch = comicCoverSearch;
+        SearchImage = searchImage;
+
+        // The window taskbar shows the progress of whichever search tab is running:
+        // merge both tabs' taskbar state into the single window TaskbarItemInfo binding.
+        ComicCoverSearch.PropertyChanged += OnSearchTabProgressChanged;
+        SearchImage.PropertyChanged += OnSearchTabProgressChanged;
 
         RebuildMenu();
     }
@@ -63,6 +73,7 @@ public partial class MainViewModel : ObservableObject
             3 => Analyze,
             4 => Settings,
             5 => ComicCoverSearch,
+            6 => SearchImage,
             _ => null
         };
 
@@ -79,5 +90,36 @@ public partial class MainViewModel : ObservableObject
     private void About()
     {
         StatusMessage = "Image Classification — EfficientNet/ConvNeXt/MobileNetV3";
+    }
+
+    // ── Merged taskbar progress (window TaskbarItemInfo is bound to these properties) ──
+
+    [ObservableProperty]
+    private double _taskbarProgressValue;
+
+    [ObservableProperty]
+    private TaskbarItemProgressState _taskbarProgressState = TaskbarItemProgressState.None;
+
+    private void OnSearchTabProgressChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is not ("TaskbarProgressValue" or "TaskbarProgressState"))
+            return;
+
+        // Show the busy tab's progress; if both are idle, hide the bar.
+        if (SearchImage.IsBusy)
+        {
+            TaskbarProgressState = SearchImage.TaskbarProgressState;
+            TaskbarProgressValue = SearchImage.TaskbarProgressValue;
+        }
+        else if (ComicCoverSearch.IsBusy)
+        {
+            TaskbarProgressState = ComicCoverSearch.TaskbarProgressState;
+            TaskbarProgressValue = ComicCoverSearch.TaskbarProgressValue;
+        }
+        else
+        {
+            TaskbarProgressState = TaskbarItemProgressState.None;
+            TaskbarProgressValue = 0;
+        }
     }
 }

@@ -24,7 +24,7 @@ public static class CoreServiceCollectionExtensions
         services.AddSingleton<ImageFeatureExtractor>();
         services.AddSingleton<ClipImageEncoder>();
         services.AddSingleton<ClipTextEncoder>();
-        services.AddSingleton<BatchImageEncoder>();
+        services.AddSingleton<IBatchImageEncoder, BatchImageEncoder>();
 
         // Public-facing interface → cached decorator
         services.AddSingleton<IClipImageEncoder, CachedClipImageEncoder>();
@@ -37,6 +37,7 @@ public static class CoreServiceCollectionExtensions
         services.AddSingleton<IModelDownloader>(_ => new ModelDownloader());
         services.AddSingleton<IAppInitializationService, AppInitializationService>();
         services.AddSingleton<IComicCoverSearchService, ComicCoverSearchService>();
+        services.AddSingleton<IImageSearchService, ImageSearchService>();
 
         return services;
     }

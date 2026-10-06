@@ -9,15 +9,18 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Microsoft.Xaml.Behaviors.Wpf" Version="1.1.39" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="LiveChartsCore.SkiaSharpView.WPF" Version="2.0.0-rc5.4" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="8.0.1" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="8.0.1" />
+    <PackageReference Include="VirtualizingWrapPanel" Version="2.5.4" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\ImageClassification.ArchiveReader\ImageClassification.ArchiveReader.csproj" />
     <ProjectReference Include="..\ImageClassification.Core\ImageClassification.Core.csproj" />
+    <ProjectReference Include="..\ImageClassification.Pdf\ImageClassification.Pdf.csproj" />
     <ProjectReference Include="..\ImageClassification.VectorStore\ImageClassification.VectorStore.csproj" />
   </ItemGroup>
 

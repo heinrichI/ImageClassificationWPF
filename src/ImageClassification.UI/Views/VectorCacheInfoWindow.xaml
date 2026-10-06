@@ -36,7 +36,7 @@
             <TextBlock Grid.Row="3" Grid.Column="0" Text="— Covers (one per archive)" Foreground="Gray" />
             <TextBlock Grid.Row="3" Grid.Column="1" x:Name="CoversText" />
 
-            <TextBlock Grid.Row="4" Grid.Column="0" Text="— All pages (per archive page)" Foreground="Gray" />
+            <TextBlock Grid.Row="4" Grid.Column="0" Text="— Archives fully cached (one row per archive)" Foreground="Gray" />
             <TextBlock Grid.Row="4" Grid.Column="1" x:Name="AllPagesText" />
 
             <TextBlock Grid.Row="5" Grid.Column="0" Text="Models" Foreground="Gray" />

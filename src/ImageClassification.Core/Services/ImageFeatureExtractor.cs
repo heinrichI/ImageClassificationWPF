@@ -120,15 +120,21 @@ internal sealed class ImageFeatureExtractor : IImageFeatureExtractor
     }
 
     public async Task<List<ImageFeatures>> ExtractBatchAsync(
-        List<string> imagePaths, IProgress<int>? progress = null)
+        List<string> imagePaths, IProgress<int>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         await EnsureInitializedAsync().ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         var results = new ConcurrentBag<ImageFeatures>();
 
         await Task.Run(() =>
         {
             int completed = 0;
-            var parallelOptions = new ParallelOptions { MaxDegreeOfParallelism = 4 };
+            var parallelOptions = new ParallelOptions
+            {
+                MaxDegreeOfParallelism = 4,
+                CancellationToken = cancellationToken
+            };
 
             Parallel.ForEach(imagePaths, parallelOptions, imagePath =>
             {

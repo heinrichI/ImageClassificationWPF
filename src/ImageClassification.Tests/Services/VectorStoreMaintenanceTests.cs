@@ -53,22 +53,22 @@ public class VectorStoreMaintenanceTests : IDisposable
     }
 
     [Fact]
-    public async Task GetCacheInfo_ReflectsCoversAndAllPagesSplits()
+    public async Task GetCacheInfo_ReflectsCoversAndArchiveRows()
     {
         var lm = new DateTime(2025, 12, 23, 8, 49, 55, DateTimeKind.Utc);
         using var store = new SqliteVectorStore(_dbPath);
 
-        // 2 covers keys + 3 all-pages keys (one archive, pages 0..2)
-        await store.SaveAsync("ClipViTB32", @"I:\c\One.cbr", lm, 111, Vector(1));
-        await store.SaveAsync("ClipViTB32", @"I:\c\Two.cbr", lm, 222, Vector(2));
-        for (var p = 0; p < 3; p++)
-            await store.SaveAsync("ClipViTB32", $@"I:\c\Big.cbr|page={p}", lm, 333, Vector(10 + p));
+        // 2 cover rows + 1 archive row holding 3 pages (counted as ONE entry)
+        await store.SaveCoverAsync("ClipViTB32", @"I:\c\One.cbr", lm, 111, Vector(1));
+        await store.SaveCoverAsync("ClipViTB32", @"I:\c\Two.cbr", lm, 222, Vector(2));
+        await store.SaveArchiveAsync("ClipViTB32", @"I:\c\Big.cbr", 3, lm, 333,
+            new[] { Vector(10), Vector(11), Vector(12) });
 
         var info = await store.GetCacheInfoAsync();
 
-        Assert.Equal(5, info.TotalEntries);
+        Assert.Equal(3, info.TotalEntries);
         Assert.Equal(2, info.CoversEntries);
-        Assert.Equal(3, info.AllPagesEntries);
+        Assert.Equal(1, info.AllPagesEntries);
         Assert.Contains("ClipViTB32", info.Models);
         Assert.NotNull(info.OldestEntryUtc);
         Assert.NotNull(info.NewestEntryUtc);
@@ -129,5 +129,108 @@ public class VectorStoreMaintenanceTests : IDisposable
         Assert.NotNull(hit);
         // The overwritten value must be the post-replace vector
         Assert.Equal(Vector(103)[10], hit![10]);
+    }
+
+    [Fact]
+    public async Task Prune_RemovesMissingFiles_KeepsExistingAndOfflineDiskEntries()
+    {
+        var lm = new DateTime(2025, 12, 23, 8, 49, 55, DateTimeKind.Utc);
+        var dir = Path.Combine(Path.GetTempPath(), $"ics_prune_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        try
+        {
+            using var store = new SqliteVectorStore(_dbPath);
+
+            // Existing file on a connected disk → kept
+            var realFile = Path.Combine(dir, "real.cbz");
+            File.WriteAllText(realFile, "x");
+            // Missing file on a connected disk → removed (cover row + archive row)
+            var missingFile = Path.Combine(dir, "missing.cbz");
+            // File on a disk that is not connected → kept (removable media may come back)
+            var offlineRoot = FindOfflineDriveRoot();
+            var offlineFile = offlineRoot is not null ? offlineRoot + "comic.cbz" : null;
+
+            await store.SaveCoverAsync("ClipViTB32", realFile, lm, 1, Vector(1));
+            await store.SaveCoverAsync("ClipViTB32", missingFile, lm, 1, Vector(2));
+            await store.SaveArchiveAsync("ClipViTB32", missingFile, 2, lm, 1,
+                new[] { Vector(3), Vector(4) });
+            if (offlineFile is not null)
+                await store.SaveCoverAsync("ClipViTB32", offlineFile, lm, 1, Vector(5));
+
+            var result = await store.PruneMissingFilesAsync();
+
+            Assert.True(result.Success, result.Detail);
+            Assert.Equal("prune", result.Operation);
+
+            Assert.NotNull(await store.GetCoverAsync("ClipViTB32", realFile, lm, 1));
+            Assert.Null(await store.GetCoverAsync("ClipViTB32", missingFile, lm, 1));
+            Assert.Null(await store.GetArchiveAsync("ClipViTB32", missingFile, lm, 1));
+
+            if (offlineFile is not null)
+            {
+                // Disk not connected → entry must survive the prune
+                Assert.NotNull(await store.GetCoverAsync("ClipViTB32", offlineFile, lm, 1));
+                Assert.Contains(offlineRoot!, result.Detail);
+            }
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Prune_ModelFilter_RemovesOnlyEntriesOfThatModel()
+    {
+        var lm = new DateTime(2025, 12, 23, 8, 49, 55, DateTimeKind.Utc);
+        var dir = Path.Combine(Path.GetTempPath(), $"ics_prune_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(dir);
+        var missingFile = Path.Combine(dir, "missing.cbz"); // never created
+        try
+        {
+            using var store = new SqliteVectorStore(_dbPath);
+
+            await store.SaveAsync("ClipViTB32", missingFile, lm, 1, Vector(1));
+            await store.SaveAsync("OtherModel", missingFile, lm, 1, Vector(2));
+
+            var result = await store.PruneMissingFilesAsync("OtherModel");
+
+            Assert.True(result.Success, result.Detail);
+            Assert.Equal("prune", result.Operation);
+
+            // Other model's entry for the same missing file must be untouched
+            Assert.NotNull(await store.GetAsync("ClipViTB32", missingFile, lm, 1));
+            Assert.Null(await store.GetAsync("OtherModel", missingFile, lm, 1));
+        }
+        finally
+        {
+            try { Directory.Delete(dir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void BaseFilePath_StripsPageSuffix_CoversKeysUntouched()
+    {
+        Assert.Equal(@"I:\c\Big.cbr", SqliteVectorStore.BaseFilePath(@"I:\c\Big.cbr|page=42"));
+        Assert.Equal(@"I:\c\One.cbr", SqliteVectorStore.BaseFilePath(@"I:\c\One.cbr"));
+    }
+
+    /// <summary>
+    /// Finds a drive letter that is not currently ready, so tests can simulate files on
+    /// disconnected removable media. Returns null when every letter is a ready drive.
+    /// </summary>
+    private static string? FindOfflineDriveRoot()
+    {
+        for (char c = 'Z'; c >= 'A'; c--)
+        {
+            var root = $"{c}:\\";
+            try
+            {
+                if (!new DriveInfo(root).IsReady)
+                    return root;
+            }
+            catch { /* keep looking */ }
+        }
+        return null;
     }
 }

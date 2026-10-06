@@ -9,5 +9,6 @@ public interface ITagService : IDisposable
         List<string> imagePaths,
         string[] candidateTags,
         int topK = 5,
-        IProgress<int>? progress = null);
+        IProgress<int>? progress = null,
+        CancellationToken cancellationToken = default);
 }

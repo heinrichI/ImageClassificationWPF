@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using Microsoft.Extensions.Logging;
@@ -20,26 +21,21 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
 {
     private const string ModelName = "ClipViTB32";
     private const int ArchiveParallelism = 4; // archives opened/processed concurrently
-    private static readonly string[] ArchivePatterns = { "*.cbz", "*.cbr", "*.cb7", "*.cbt" };
+    // PDFs (scanned single-file comics) join the archive formats; they are handled by the
+    // ImageClassification.Pdf container handler (registered via AddPdf() in the DI composition root).
+    private static readonly string[] ArchivePatterns = { "*.cbz", "*.cbr", "*.cb7", "*.cbt", "*.pdf" };
 
     private readonly IArchiveReader _archiveReader;
     private readonly IClipTextEncoder _textEncoder;
     private readonly IVectorStore _store;
-    private readonly BatchImageEncoder _batchEncoder;
+    private readonly IBatchImageEncoder _batchEncoder;
     private readonly ILogger<ComicCoverSearchService> _logger;
-
-    /// <summary>
-    /// In-memory page counts learned from archives opened during this app session.
-    /// Lets re-runs of an all-pages search probe the cache first and skip the
-    /// archive open entirely when every page is already cached.
-    /// </summary>
-    private readonly ConcurrentDictionary<string, int> _seenPageCounts = new();
 
     public ComicCoverSearchService(
         IArchiveReader archiveReader,
         IClipTextEncoder textEncoder,
         IVectorStore store,
-        BatchImageEncoder batchEncoder,
+        IBatchImageEncoder batchEncoder,
         ILogger<ComicCoverSearchService> logger)
     {
         _archiveReader = archiveReader ?? throw new ArgumentNullException(nameof(archiveReader));
@@ -146,6 +142,19 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
             .EncodeTextAsync($"a photo of {query}", ct).ConfigureAwait(false);
         _logger.LogInformation("[{Label}] Text encoding: {Ms}ms", label, (sw.Elapsed - t0).TotalMilliseconds);
 
+        // 2.5. The store's one-time legacy migration runs on a background thread at
+        // startup. It has almost always finished by the time a search starts; if not,
+        // wait for it here and say so explicitly instead of stalling at 0/N.
+        var migWait = sw.Elapsed;
+        await _store.WhenReady;
+        var migMs = (sw.Elapsed - migWait).TotalMilliseconds;
+        if (migMs > 1000)
+        {
+            _logger.LogInformation("[{Label}] Waited {Ms} ms for the vector-cache migration to finish",
+                label, migMs);
+            ReportPhase(status, ct, "Vector cache: legacy migration finished — resuming...");
+        }
+
         // 3. Process archives — one open handle per archive, progress = archive count
         int total = archiveFiles.Count;
         ReportPhase(status, ct, "Processing archives...");
@@ -214,10 +223,26 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         int cacheMisses = 0;
         int failedExtractions = 0;
         int flushedBatches = 0;
+        int archivesSaved = 0;
+        int saveFailures = 0;
+
+        // Per-archive save buffers, touched by the consumer thread only. An archive is
+        // saved (one packed "archive_embeddings" row / one "cover_embeddings" row) only
+        // when EVERY page of it ended up in the buffer — that row then doubles as the
+        // "fully cached" marker for the next run. Cancelled or partially failed
+        // archives keep no row and are re-encoded on the next search.
+        var saveBuffers = new Dictionary<string, ArchiveSaveBuffer>(StringComparer.Ordinal);
 
         // Throttled (250 ms) reporter for high-frequency detail lines:
         // per-archive completion and GPU-queue snapshots shown verbatim in the UI.
-        var detailStatus = new ThrottledStatusReporter(status, ct);
+        var detailStatus = new ThrottledStatusReporter<ComicSearchStatus>(status, ct);
+
+        // Independent 250 ms throttle for the "currently processing file" reports: they
+        // ride the RAW status channel (bypassing the detail slot), so a burst of archive
+        // starts can't starve the GPU-queue detail lines — and the UI sees at most
+        // ~4 file labels per second.
+        const long fileReportIntervalTicks = 250 * TimeSpan.TicksPerMillisecond;
+        long lastFileReportTicks = 0;
 
         var producer = Task.Run(async () =>
         {
@@ -234,6 +259,16 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                         {
                             token.ThrowIfCancellationRequested();
 
+                            // "Currently processing" label: the UI shows the most recently
+                            // started archive (self-throttled to 250 ms, own slot).
+                            long nowTicks = DateTime.UtcNow.Ticks;
+                            long lastFile = Interlocked.Read(ref lastFileReportTicks);
+                            if (nowTicks - lastFile >= fileReportIntervalTicks
+                                && Interlocked.CompareExchange(ref lastFileReportTicks, nowTicks, lastFile) == lastFile)
+                            {
+                                status?.Report(new ComicSearchStatus { CurrentFile = path });
+                            }
+
                             DateTime lastModified;
                             long fileSize;
                             try
@@ -249,42 +284,40 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                             }
 
                             // ── Cache-first: answer from the vector store without touching the archive ──
+                            // A fresh "archive_embeddings" row carries the WHOLE page array
+                            // plus its page count, so it doubles as the "fully cached"
+                            // marker: even a fresh process skips the archive open entirely.
+
+                            int knownPageCount = 0;
 
                             if (allPages)
                             {
-                                // Previously-seen archive: probe every learned page; if all hit,
-                                // no archive open is needed at all.
-                                if (_seenPageCounts.TryGetValue(path, out int seen) && seen > 0)
+                                var cached = await GetArchiveCachedAsync(path, lastModified, fileSize);
+                                if (cached is not null)
                                 {
-                                    var probe = await BatchGetCacheAsync(
-                                        BuildCacheEntries(path, seen, true, lastModified, fileSize)).ConfigureAwait(false);
-
-                                    if (IsFullyCached(path, seen, true, probe))
+                                    var (pageTotal, pages) = cached.Value;
+                                    knownPageCount = pageTotal;
+                                    for (int p = 0; p < pageTotal; p++)
                                     {
-                                        for (int p = 0; p < seen; p++)
-                                        {
-                                            token.ThrowIfCancellationRequested();
-                                            Interlocked.Increment(ref cacheHits);
-                                            onResult(ToResult(path, p, seen, probe[CacheKeyFor(path, p, true)]!, queryEmbedding));
-                                        }
-
-                                        _logger.LogInformation(
-                                            "[Pipeline] {Name}: all {Pages} page(s) cached — archive not opened",
-                                            Path.GetFileName(path), seen);
-
-                                        ReportArchiveDone();
-                                        return;
+                                        token.ThrowIfCancellationRequested();
+                                        Interlocked.Increment(ref cacheHits);
+                                        onResult(ToResult(path, p, pageTotal, pages[p], queryEmbedding));
                                     }
+
+                                    _logger.LogInformation(
+                                        "[Pipeline] {Name}: all {Pages} page(s) cached — archive not opened",
+                                        Path.GetFileName(path), pageTotal);
+
+                                    ReportArchiveDone();
+                                    return;
                                 }
+                                // (per-page misses are counted in the slow-path loop below)
                             }
                             else
                             {
                                 // Covers mode: a single cache probe for page 0.
-                                string coverKey = CacheKeyFor(path, 0, false);
-                                var probe = await BatchGetCacheAsync(
-                                    BuildCacheEntries(path, 1, false, lastModified, fileSize)).ConfigureAwait(false);
-
-                                if (probe.TryGetValue(coverKey, out var coverHit) && coverHit is not null)
+                                var coverHit = await GetCoverCachedAsync(path, lastModified, fileSize);
+                                if (coverHit is not null)
                                 {
                                     Interlocked.Increment(ref cacheHits);
                                     // Page count is unknown (archive not opened) — 0 makes the
@@ -331,27 +364,17 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                             else
                             {
                                 int pageEnd = allPages ? pageCount : 1; // covers mode: page 0 only
-                                if (allPages)
-                                    _seenPageCounts[path] = pageCount;
+                                knownPageCount = pageCount;
 
-                                // Batch-check the embedding cache for the pages to process
-                                var cached = await BatchGetCacheAsync(
-                                    BuildCacheEntries(path, pageEnd, allPages, lastModified, fileSize)).ConfigureAwait(false);
-
-                                // Variant B: if more than half of the pages are cache misses,
-                                // extract the archive in ONE bulk pass — for solid 7z archives
-                                // per-entry extraction re-decodes the whole solid prefix for
-                                // every entry (O(N²)), while a single full pass is O(N).
-                                // Covers mode (pageEnd == 1) always extracts per page.
-                                int missCount = 0;
-                                for (int p = 0; p < pageEnd; p++)
-                                {
-                                    string probeKey = CacheKeyFor(path, p, allPages);
-                                    if (!cached.TryGetValue(probeKey, out var probe) || probe is null)
-                                        missCount++;
-                                }
-
-                                byte[]?[]? bulk = pageEnd > 1 && missCount * 2 > pageEnd
+                                // The cache row is all-or-nothing per archive (a fresh row
+                                // means every page was cached and was taken by the fast
+                                // path above), so on the slow path EVERY page is a miss:
+                                // multi-page archives are extracted in ONE bulk pass —
+                                // for solid 7z archives per-entry extraction re-decodes the
+                                // whole solid prefix for every entry (O(N²)), while a single
+                                // full pass is O(N). Covers (pageEnd == 1) extract the one
+                                // page directly.
+                                byte[]?[]? bulk = pageEnd > 1
                                     ? await session.ExtractAllToMemoryAsync().ConfigureAwait(false)
                                     : null;
 
@@ -368,26 +391,16 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                                     });
                                 }
 
-                                int archiveHits = 0;
                                 int archiveMisses = 0;
 
                                 for (int p = 0; p < pageEnd; p++)
                                 {
                                     token.ThrowIfCancellationRequested();
-                                    string cacheKey = CacheKeyFor(path, p, allPages);
 
-                                    if (cached.TryGetValue(cacheKey, out var hit) && hit is not null)
-                                    {
-                                        archiveHits++;
-                                        Interlocked.Increment(ref cacheHits);
-                                        onResult(ToResult(path, p, pageCount, hit, queryEmbedding));
-                                        continue;
-                                    }
-
-                                    // Cache miss — take bytes from the bulk pass (when used)
-                                    // or extract from the already-open session handle
-                                    // (per-page misses are aggregated into the per-archive and
-                                    // final "Cache summary" log lines — no per-page log flood)
+                                    // Take bytes from the bulk pass (when used) or extract
+                                    // from the already-open session handle (per-page misses
+                                    // are aggregated into the per-archive and final
+                                    // "Cache summary" log lines — no per-page log flood)
                                     Interlocked.Increment(ref cacheMisses);
                                     archiveMisses++;
                                     byte[]? bytes = bulk is not null
@@ -401,17 +414,15 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                                         continue;
                                     }
 
-                                    //_logger.LogWarning("Not found in cache {Path} {CacheKey}", path, cacheKey);
-                                    var workItem = new ImageWorkItem(path, p, pageCount, cacheKey, lastModified, fileSize, bytes);
+                                    var workItem = new ImageWorkItem(path, p, pageCount, allPages, lastModified, fileSize, bytes);
                                     // Blocking add: backpressure on the bounded queue, respects the token
                                     queue.Add(workItem, token);
                                     Interlocked.Increment(ref enqueued);
                                 }
 
                                 _logger.LogInformation(
-                                    "[Pipeline] {Name}: {Hits}/{Total} page(s) та длfrom cache{Misses}",
-                                    Path.GetFileName(path), archiveHits, pageEnd,
-                                    archiveMisses > 0 ? $", {archiveMisses} cache miss" : string.Empty);
+                                    "[Pipeline] {Name}: {Total} page(s) to encode (no fresh cache row)",
+                                    Path.GetFileName(path), pageEnd);
                             }
 
                             void ReportArchiveDone()
@@ -430,7 +441,7 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                                 _logger.LogInformation(
                                     "[Pipeline] Archive {Done}/{Total} processed: {Name} ({PageCount} pages)",
                                     done, archiveFiles.Count, Path.GetFileName(path),
-                                    allPages ? _seenPageCounts.GetValueOrDefault(path) : 0);
+                                    knownPageCount);
                             }
 
                             ReportArchiveDone();
@@ -471,18 +482,33 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
 
                 onResult(ToResult(work.ArchivePath, work.PageIndex, work.PageCount, embedding, queryEmbedding));
 
+                // Accumulate the page in the archive's save buffer; when the last page
+                // arrives, the whole archive is written as ONE row (which doubles as its
+                // "fully cached" marker). The consumer is the only thread here, so the
+                // plain dictionary needs no locking.
+                if (!saveBuffers.TryGetValue(work.ArchivePath, out var buffer))
+                {
+                    buffer = new ArchiveSaveBuffer(work.AllPages, work.AllPages ? work.PageCount : 1,
+                        work.LastModified, work.FileSize);
+                    saveBuffers[work.ArchivePath] = buffer;
+                }
+                if (!buffer.Add(work.PageIndex, embedding))
+                    continue;
+
+                saveBuffers.Remove(work.ArchivePath);
                 try
                 {
-                    await _store
-                        .SaveAsync(ModelName, work.CacheKey, work.LastModified, work.FileSize, embedding)
-                        .ConfigureAwait(false);
-                    //_logger.LogInformation(
-                        //"Saved to cache {CacheKey} {LastModified} {FileSize}",
-                        //work.CacheKey, work.LastModified, work.FileSize);
+                    await buffer.SaveAsync(_store, ModelName, work.ArchivePath).ConfigureAwait(false);
+                    Interlocked.Increment(ref archivesSaved);
                 }
                 catch
                 {
-                    // Best effort cache save
+                    // Best-effort cache save — the search result is still complete; the
+                    // archive simply gets no "fully cached" row and is re-encoded next run.
+                    Interlocked.Increment(ref saveFailures);
+                    _logger.LogWarning(
+                        "[Pipeline] Saving archive row failed for {Path} — it will be re-encoded on the next search",
+                        work.ArchivePath);
                 }
             }
 
@@ -515,9 +541,12 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         await FlushBatchAsync().ConfigureAwait(false);
         await producer.ConfigureAwait(false);
 
+        // The "fully cached" rows of the archives opened in this run were already
+        // persisted by the consumer the moment each archive's last page was encoded —
+        // an archive row exists only when EVERY page of the archive is in the cache.
         _logger.LogInformation(
-            "[Pipeline] Completed: archives={Archives}, enqueued={Enqueued}, cacheHits={Hits}, failedExtractions={Failed}, flushedBatches={Batches}",
-            archiveFiles.Count, enqueued, cacheHits, failedExtractions, flushedBatches);
+            "[Pipeline] Completed: archives={Archives}, enqueued={Enqueued}, cacheHits={Hits}, failedExtractions={Failed}, flushedBatches={Batches}, archivesSaved={ArchivesSaved}, saveFailures={SaveFailures}",
+            archiveFiles.Count, enqueued, cacheHits, failedExtractions, flushedBatches, archivesSaved, saveFailures);
 
         // One-line answer to "is the cache working?" — a re-search of the same
         // directory should show a hit rate near 100%.
@@ -555,32 +584,44 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Embedding cache key — kept compatible with keys written by previous versions:
-    /// covers mode caches under the bare archive path, all-pages mode under "{path}|page={index}".
+    /// Fresh "archive_embeddings" row of the archive — the whole page array plus its
+    /// page count — or null when the row is missing / stale / the store fails. A
+    /// throwing store (locked/corrupt DB) must not break the search: the archive is
+    /// opened and re-encoded as usual instead of masquerading as "cache not working".
     /// </summary>
-    private static string CacheKeyFor(string archivePath, int pageIndex, bool allPages)
-        => allPages ? $"{archivePath}|page={pageIndex}" : archivePath;
-
-    /// <summary>Builds the probe entries for pages [0, pageEnd) of an archive.</summary>
-    private static List<(string FilePath, DateTime LastModified, long FileSize)> BuildCacheEntries(
-        string archivePath, int pageEnd, bool allPages, DateTime lastModified, long fileSize)
+    private async Task<(int PageCount, float[][] Pages)?> GetArchiveCachedAsync(
+        string archivePath, DateTime lastModifiedUtc, long fileSize)
     {
-        var entries = new List<(string, DateTime, long)>(pageEnd);
-        for (int p = 0; p < pageEnd; p++)
-            entries.Add((CacheKeyFor(archivePath, p, allPages), lastModified, fileSize));
-        return entries;
+        try
+        {
+            return await _store
+                .GetArchiveAsync(ModelName, archivePath, lastModifiedUtc, fileSize)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[Pipeline] Vector store archive probe failed — {Path} treated as a miss", archivePath);
+            return null;
+        }
     }
 
-    /// <summary>True when every page in [0, pageEnd) has a fresh, non-null cached vector.</summary>
-    private static bool IsFullyCached(
-        string archivePath, int pageEnd, bool allPages, Dictionary<string, float[]?> cached)
+    /// <summary>Fresh cover vector, or null on miss / stale / store failure (see above).</summary>
+    private async Task<float[]?> GetCoverCachedAsync(
+        string archivePath, DateTime lastModifiedUtc, long fileSize)
     {
-        for (int p = 0; p < pageEnd; p++)
+        try
         {
-            if (!cached.TryGetValue(CacheKeyFor(archivePath, p, allPages), out var vec) || vec is null)
-                return false;
+            return await _store
+                .GetCoverAsync(ModelName, archivePath, lastModifiedUtc, fileSize)
+                .ConfigureAwait(false);
         }
-        return true;
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "[Pipeline] Vector store cover probe failed — {Path} treated as a miss", archivePath);
+            return null;
+        }
     }
 
     private static ComicCoverResult ToResult(
@@ -590,27 +631,10 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         {
             ArchivePath = archivePath,
             ArchiveFileName = Path.GetFileName(archivePath),
-            SimilarityScore = CosineSimilarity(embedding, queryEmbedding),
+            SimilarityScore = VectorMath.CosineSimilarity(embedding, queryEmbedding),
             PageIndex = pageIndex,
             PageCount = pageCount
         };
-    }
-
-    private async Task<Dictionary<string, float[]?>> BatchGetCacheAsync(
-        List<(string FilePath, DateTime LastModified, long FileSize)> entries)
-    {
-        try
-        {
-            return await _store.GetBatchAsync(ModelName, entries).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            // A throwing store (locked/corrupt DB) would silently turn every probe
-            // into a miss — surface it so it cannot masquerade as "cache not working".
-            _logger.LogWarning(ex,
-                "[Pipeline] Vector store batch probe failed — {Count} page(s) treated as misses", entries.Count);
-            return new Dictionary<string, float[]?>();
-        }
     }
 
     /// <summary>
@@ -620,44 +644,6 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     /// </summary>
     private static string FormatGpuDetail(int doneArchives, int totalArchives, int flushedBatches, int queueDepth)
         => $"Processing archives: {doneArchives}/{totalArchives} · GPU {flushedBatches} batches · queue {queueDepth}";
-
-    /// <summary>
-    /// Cancellation-safe status reporter with a minimum 250 ms interval between reports —
-    /// used for high-frequency detail lines (archive completions, queue snapshots) so a
-    /// burst of archive events can't flood the UI thread. Coarse phase transitions are
-    /// reported separately and stay immediate.
-    /// </summary>
-    private sealed class ThrottledStatusReporter
-    {
-        private static readonly long MinIntervalTicks = 250 * TimeSpan.TicksPerMillisecond;
-
-        private readonly IProgress<ComicSearchStatus>? _status;
-        private readonly CancellationToken _ct;
-        private long _lastReportTicks; // 0 = never reported (tick counts are positive)
-
-        public ThrottledStatusReporter(IProgress<ComicSearchStatus>? status, CancellationToken ct)
-        {
-            _status = status;
-            _ct = ct;
-        }
-
-        public void Report(ComicSearchStatus update)
-        {
-            if (_status is null || _ct.IsCancellationRequested)
-                return;
-
-            long now = DateTime.UtcNow.Ticks;
-            long last = Interlocked.Read(ref _lastReportTicks);
-            if (now - last < MinIntervalTicks)
-                return;
-
-            // Only one caller wins the slot; losers skip this tick
-            if (Interlocked.CompareExchange(ref _lastReportTicks, now, last) != last)
-                return;
-
-            _status.Report(update);
-        }
-    }
 
     internal static List<string> ScanArchivesRecursive(string directoryPath)
     {
@@ -680,15 +666,6 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         return files;
     }
 
-    internal static float CosineSimilarity(float[] a, float[] b)
-    {
-        float dot = 0;
-        int len = Math.Min(a.Length, b.Length);
-        for (int i = 0; i < len; i++)
-            dot += a[i] * b[i];
-        return dot;
-    }
-
     public void Dispose()
     {
         GC.SuppressFinalize(this);
@@ -698,8 +675,61 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         string ArchivePath,
         int PageIndex,
         int PageCount,
-        string CacheKey,
+        bool AllPages,
         DateTime LastModified,
         long FileSize,
         byte[] ImageData);
+
+    /// <summary>
+    /// Accumulates one archive's encoded pages on the consumer thread. Only an archive
+    /// where EVERY expected page arrived produces a cache row (all-pages: one packed
+    /// "archive_embeddings" row; covers: one "cover_embeddings" row) — that row doubles
+    /// as the "fully cached" marker for the next run.
+    /// </summary>
+    private sealed class ArchiveSaveBuffer
+    {
+        private readonly bool _allPages;
+        private readonly DateTime _lastModifiedUtc;
+        private readonly long _fileSize;
+        private readonly float[]?[] _slots;
+        private int _pending;
+
+        public ArchiveSaveBuffer(bool allPages, int expectedPages, DateTime lastModifiedUtc, long fileSize)
+        {
+            _allPages = allPages;
+            _lastModifiedUtc = lastModifiedUtc;
+            _fileSize = fileSize;
+            _slots = new float[expectedPages > 0 ? expectedPages : 1][];
+            _pending = _slots.Length;
+        }
+
+        /// <summary>
+        /// Stores one encoded page. Returns true when this was the last pending page,
+        /// i.e. the whole archive is ready to be written as a single cache row.
+        /// </summary>
+        public bool Add(int pageIndex, float[] embedding)
+        {
+            if (pageIndex < 0 || pageIndex >= _slots.Length || _slots[pageIndex] is not null)
+                return _pending == 0; // unexpected or duplicate page — ignore
+            _slots[pageIndex] = embedding;
+            _pending--;
+            return _pending == 0;
+        }
+
+        public async Task SaveAsync(IVectorStore store, string modelName, string archivePath)
+        {
+            if (_allPages)
+            {
+                var pages = new float[_slots.Length][];
+                for (var i = 0; i < _slots.Length; i++)
+                    pages[i] = _slots[i]!;
+                await store.SaveArchiveAsync(modelName, archivePath, pages.Length,
+                    _lastModifiedUtc, _fileSize, pages);
+            }
+            else
+            {
+                await store.SaveCoverAsync(modelName, archivePath, _lastModifiedUtc, _fileSize, _slots[0]!);
+            }
+        }
+    }
 }

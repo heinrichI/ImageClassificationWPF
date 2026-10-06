@@ -43,4 +43,11 @@ public sealed record ComicSearchStatus
     /// of the search in a visible list.
     /// </summary>
     public string? Note { get; init; }
+
+    /// <summary>
+    /// Full path of the archive being processed at the moment of this report. The UI shows
+    /// it in its own label (never in the status line). Because the pipeline opens several
+    /// archives concurrently, this is "the most recently started archive", not THE one.
+    /// </summary>
+    public string? CurrentFile { get; init; }
 }

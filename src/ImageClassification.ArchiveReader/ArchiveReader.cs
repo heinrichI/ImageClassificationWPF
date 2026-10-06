@@ -25,10 +25,22 @@ internal sealed class ArchiveReader : IArchiveReader
     };
 
     private readonly ILogger<ArchiveReader>? _logger;
+    private readonly IReadOnlyList<IContainerHandler> _handlers;
 
-    public ArchiveReader(ILogger<ArchiveReader>? logger = null)
+    public ArchiveReader(IEnumerable<IContainerHandler>? handlers = null, ILogger<ArchiveReader>? logger = null)
     {
         _logger = logger;
+
+        var list = handlers?.ToList() ?? new List<IContainerHandler>();
+        if (list.Count == 0)
+        {
+            // Direct construction without DI (tests): fall back to the built-in handlers.
+            list.AddRange(new IContainerHandler[] { new ZipContainerHandler(), new SevenZipContainerHandler() });
+        }
+
+        // Pre-sort by Priority so specific formats (.cbz=10, .pdf=20, ...) always beat the
+        // catch-all 7z fallback (1000), regardless of DI registration order.
+        _handlers = list.OrderBy(h => h.Priority).ToList();
     }
 
     private readonly record struct ImageEntrySortKey(
@@ -62,33 +74,41 @@ internal sealed class ArchiveReader : IArchiveReader
     }
 
     /// <inheritdoc />
-    public Task<IArchiveSession> OpenSessionAsync(string archivePath)
+    public async Task<IArchiveSession> OpenSessionAsync(string archivePath)
     {
         if (string.IsNullOrWhiteSpace(archivePath) || !File.Exists(archivePath))
-            return Task.FromResult<IArchiveSession>(EmptyArchiveSession.Instance);
-
-        try
         {
-            if (archivePath.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase))
-                return Task.FromResult<IArchiveSession>(new ZipArchiveSession(archivePath));
+            return EmptyArchiveSession.Instance;
+        }
 
-            return Task.FromResult<IArchiveSession>(new SevenZipArchiveSession(archivePath, _logger));
-        }
-        catch (Exception ex)
+        // Handlers are tried in ascending Priority order. Handlers must not throw (contract of
+        // IContainerHandler); the guard below keeps a buggy handler from taking the search down.
+        foreach (var handler in _handlers)
         {
-            // Corrupt/unsupported container — treat as an empty archive so callers
-            // can skip it without special-casing failures. The diagnostic note rides
-            // on the empty session so the UI can show why the archive was skipped.
-            _logger?.LogDebug(ex, "Failed to open archive session for {Path} — treating as empty", archivePath);
-            // Show the FULL path in the UI note: the exception message usually
-            // carries only the file name, so substitute the full path for it.
-            string fileName = Path.GetFileName(archivePath);
-            string message = ex.Message.Contains(fileName, StringComparison.OrdinalIgnoreCase)
-                ? ex.Message.Replace(fileName, archivePath, StringComparison.OrdinalIgnoreCase)
-                : $"{archivePath}: {ex.Message}";
-            string note = $"{message} — skipped as empty";
-            return Task.FromResult<IArchiveSession>(new EmptyArchiveSession(note));
+            if (!handler.CanOpen(archivePath))
+            {
+                continue;
+            }
+
+            IArchiveSession session;
+            try
+            {
+                session = await handler.OpenSessionAsync(archivePath).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                session = EmptyArchiveSession.WithNote(ContainerFailureNotes.Build(archivePath, ex));
+            }
+
+            if (!string.IsNullOrEmpty(session.LastNote))
+            {
+                _logger?.LogDebug("OpenSession {Path}: {Note}", archivePath, session.LastNote);
+            }
+
+            return session;
         }
+
+        return EmptyArchiveSession.WithNote($"No container handler registered for: {archivePath}");
     }
 
     /// <summary>
@@ -113,31 +133,65 @@ internal sealed class ArchiveReader : IArchiveReader
     // ── Session implementations ─────────────────────────────────────────────
 
     /// <summary>
-    /// Session for archives that cannot be opened or that contain no image entries.
-    /// <see cref="Instance"/> is the shared no-note variant (e.g. missing file);
-    /// the per-archive variant carries the open-failure diagnostic in <see cref="LastNote"/>.
+    /// Builds the UI-facing failure note: the exception message usually carries only the file
+    /// name, so substitute the full path for it.
     /// </summary>
-    private sealed class EmptyArchiveSession : IArchiveSession
+    internal static class ContainerFailureNotes
     {
-        public static readonly EmptyArchiveSession Instance = new();
-
-        private readonly string? _note;
-
-        public EmptyArchiveSession(string? note = null)
+        public static string Build(string archivePath, Exception ex)
         {
-            _note = note;
+            string fileName = Path.GetFileName(archivePath);
+            string message = ex.Message.Contains(fileName, StringComparison.OrdinalIgnoreCase)
+                ? ex.Message.Replace(fileName, archivePath, StringComparison.OrdinalIgnoreCase)
+                : $"{archivePath}: {ex.Message}";
+            return $"{message} — skipped as empty";
+        }
+    }
+
+    /// <summary>
+    /// Specific-format handler for zip-based containers (.cbz). ZipArchiveSession never throws from
+    /// its constructor (failures are captured in LastNote), so no try/catch is needed here.
+    /// </summary>
+    internal sealed class ZipContainerHandler : IContainerHandler
+    {
+        public int Priority => 10;
+
+        public bool CanOpen(string path) => path.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase);
+
+        public Task<IArchiveSession> OpenSessionAsync(string path)
+        {
+            return Task.FromResult<IArchiveSession>(new ZipArchiveSession(path));
+        }
+    }
+
+    /// <summary>
+    /// Catch-all handler: 7z/zip/tar containers via SevenZipExtractor. Claims every file the specific
+    /// handlers did not (.cbr/.cb7/.cbt plus unknown extensions); container mismatches (e.g. a zip
+    /// inside a .cbr) are reported through LastNote, never thrown.
+    /// </summary>
+    internal sealed class SevenZipContainerHandler : IContainerHandler
+    {
+        private readonly ILogger? _logger;
+
+        public SevenZipContainerHandler(ILogger<SevenZipContainerHandler>? logger = null)
+        {
+            _logger = logger;
         }
 
-        public IReadOnlyList<string> ImageEntries { get; } = Array.Empty<string>();
+        public int Priority => 1000;
 
-        public string? LastNote => _note;
+        public bool CanOpen(string path) => true;
 
-        public Task<byte[]?> ExtractToMemoryAsync(int index) => Task.FromResult<byte[]?>(null);
-
-        public Task<byte[]?[]> ExtractAllToMemoryAsync() => Task.FromResult<byte[]?[]>(new byte[0][]);
-
-        public void Dispose()
+        public Task<IArchiveSession> OpenSessionAsync(string path)
         {
+            try
+            {
+                return Task.FromResult<IArchiveSession>(new SevenZipArchiveSession(path, _logger));
+            }
+            catch (Exception ex)
+            {
+                return Task.FromResult<IArchiveSession>(EmptyArchiveSession.WithNote(ContainerFailureNotes.Build(path, ex)));
+            }
         }
     }
 

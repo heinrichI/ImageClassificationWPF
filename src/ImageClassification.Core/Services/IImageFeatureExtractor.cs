@@ -6,7 +6,7 @@ public interface IImageFeatureExtractor : IDisposable
 {
     Task LoadModelAsync(string modelPath, int imageSize);
     float[] ExtractFeatures(string imagePath);
-    Task<List<ImageFeatures>> ExtractBatchAsync(List<string> imagePaths, IProgress<int>? progress = null);
+    Task<List<ImageFeatures>> ExtractBatchAsync(List<string> imagePaths, IProgress<int>? progress = null, CancellationToken cancellationToken = default);
 }
 
 public class ImageFeatures

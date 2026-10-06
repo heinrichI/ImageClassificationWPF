@@ -1,13 +1,16 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using System.Windows.Shell;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
+using ImageClassification.UI.Configuration;
 using ImageClassification.UI.Services;
 using ImageClassification.UI.Views;
 using Microsoft.Extensions.Logging;
@@ -19,13 +22,14 @@ namespace ImageClassification.UI.ViewModels;
 /// Pure ViewModel for the Comic Cover Search tab.
 /// No code-behind logic — all commands and bindings are here.
 /// </summary>
-public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvider
+public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvider, IThumbnailRequester
 {
     private readonly IComicCoverSearchService _searchService;
     private readonly IVectorStore _vectorStore;
     private readonly ILogger<ComicCoverSearchViewModel> _logger;
     private readonly ThumbnailProvider _thumbnailProvider;
     private readonly ImageCopyService _copyService;
+    private readonly IUserSettingsStore _settings;
     private CancellationTokenSource? _cts;
     private CancellationTokenSource? _copyCts;
     private DateTime _lastProgressUiUpdateUtc = DateTime.MinValue;
@@ -42,13 +46,19 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
 
     public ComicCoverSearchViewModel(IComicCoverSearchService searchService, IVectorStore vectorStore,
         ILogger<ComicCoverSearchViewModel> logger,
-        ThumbnailProvider thumbnailProvider, ImageCopyService copyService)
+        ThumbnailProvider thumbnailProvider, ImageCopyService copyService, IUserSettingsStore settings)
     {
         _searchService = searchService ?? throw new ArgumentNullException(nameof(searchService));
         _vectorStore = vectorStore ?? throw new ArgumentNullException(nameof(vectorStore));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _thumbnailProvider = thumbnailProvider;
         _copyService = copyService ?? throw new ArgumentNullException(nameof(copyService));
+        _settings = settings ?? throw new ArgumentNullException(nameof(settings));
+
+        // Live thumbnail pipeline status (which file is being read, queue, loaded total).
+        // The provider is shared with the Search Image tab, so each tab subscribes its own
+        // handler; the event can fire on a worker thread and is marshaled to the UI.
+        _thumbnailProvider.StatusChanged += OnThumbnailPipelineStatus;
 
         SearchModes = new ObservableCollection<string>
         {
@@ -56,27 +66,123 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             "All pages"
         };
 
-        Results.CollectionChanged += (_, _) =>
-        {
-            CopyResultsImagesCommand.NotifyCanExecuteChanged();
-            OnPropertyChanged(nameof(HasResults));
-            OnPropertyChanged(nameof(ResultsCountText));
-        };
+        // Restore the last used search mode (covers vs all pages) from the settings.
+        SelectedModeIndex = Math.Clamp(settings.SearchMode, 0, SearchModes.Count - 1);
+
+        // Restore the persisted search root directories.
+        SearchDirectories = new ObservableCollection<string>(settings.SearchDirectories);
+
+        // Restore the last used similarity threshold (the guard in OnSimilarityThresholdChanged
+        // keeps this restore from rewriting the settings file).
+        SimilarityThreshold = Math.Clamp(settings.SimilarityThreshold, 0d, 1d);
+
+        // Restore the persisted phrase history (last 10 queries, newest first).
+        PhraseHistory = new ObservableCollection<string>(settings.SearchPhraseHistory);
+
+        Results.CollectionChanged += OnResultsCollectionChanged;
+    }
+
+    /// <summary>
+    /// Requests (or bumps) the thumbnail of <paramref name="item"> — called by the item
+    /// template's LoadThumbnailOnVisibleBehavior the moment the tile becomes visible. The
+    /// provider keeps per-tile pipeline state, so a tile that is already in flight (or
+    /// loaded) is NOT re-extracted: the request moves it to the front of whichever queue
+    /// it sits in, making the on-screen tile load first. The search itself pre-queues only
+    /// the first tiles up to the cache limit; the rest load on demand — exactly when their
+    /// tile is scrolled into view.
+    /// </summary>
+    public void RequestThumbnail(ComicCoverItem item)
+    {
+        if (item is null) return;
+        QueueThumbnail(item);
+    }
+
+    /// <summary>
+    /// <see cref="IThumbnailRequester"/> entry point for the item template's visibility
+    /// behavior: the tile's data context is cast to a cover item and queued (or bumped).
+    /// </summary>
+    public void RequestThumbnail(object? item)
+    {
+        if (item is ComicCoverItem coverItem)
+            RequestThumbnail(coverItem);
+    }
+
+    private void OnThumbnailPipelineStatus(string? text)
+    {
+        void Apply() => ThumbnailStatus = text ?? string.Empty;
+        var dispatcher = System.Windows.Application.Current?.Dispatcher;
+        if (dispatcher is not null && !dispatcher.CheckAccess())
+            dispatcher.BeginInvoke(Apply);
+        else
+            Apply();
+    }
+
+    private void QueueThumbnail(ComicCoverItem item)
+    {
+        _thumbnailProvider.EnsurePageAndEnqueue(item.ArchivePath, item.PageIndex,
+            b => { if (b is not null) item.Thumbnail = b; });
+    }
+
+    /// <summary>
+    /// Re-subscribes the collection-changed handler when the Results collection instance is
+    /// replaced (bulk population after a search). Also refreshes the derived notifications,
+    /// which the old instance's final Clear/Reset has already covered for the old data.
+    /// </summary>
+    partial void OnResultsChanged(ObservableCollection<ComicCoverItem>? oldValue, ObservableCollection<ComicCoverItem> newValue)
+    {
+        if (oldValue is not null)
+            oldValue.CollectionChanged -= OnResultsCollectionChanged;
+        newValue.CollectionChanged += OnResultsCollectionChanged;
+
+        CopyResultsImagesCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(HasResults));
+        OnPropertyChanged(nameof(ResultsCountText));
+    }
+
+    private void OnResultsCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        CopyResultsImagesCommand.NotifyCanExecuteChanged();
+        OnPropertyChanged(nameof(HasResults));
+        OnPropertyChanged(nameof(ResultsCountText));
     }
 
     // ────────────────────────────── Observable properties ──────────────────────────────
 
-    [ObservableProperty]
-    private string _directoryPath = string.Empty;
+    /// <summary>
+    /// Search root directories (persisted — a fresh process restores the list, so the user
+    /// doesn't re-select them on every launch). Every directory is scanned recursively for
+    /// comic archives; search results from all roots are merged and de-duplicated.
+    /// </summary>
+    public ObservableCollection<string> SearchDirectories { get; }
+
+    /// <summary>
+    /// The last launched search phrases (newest first, max 10) — restored from the
+    /// settings so the dropdown above the query box survives a restart.
+    /// </summary>
+    public ObservableCollection<string> PhraseHistory { get; }
 
     [ObservableProperty]
     private string _queryText = string.Empty;
+
+    /// <summary>
+    /// The phrase picked from the history dropdown. Fills <see cref="QueryText"/>; a
+    /// manual edit of the query box clears it so the dropdown stops mirroring stale text.
+    /// </summary>
+    [ObservableProperty]
+    private string? _selectedPhrase;
 
     [ObservableProperty]
     private bool _isBusy;
 
     [ObservableProperty]
     private string _statusMessage = string.Empty;
+
+    [ObservableProperty]
+    private string _thumbnailStatus = string.Empty;
+
+    /// <summary>Full path of the archive the pipeline started processing most recently (empty when idle).</summary>
+    [ObservableProperty]
+    private string _currentFile = string.Empty;
 
     [ObservableProperty]
     private double _similarityThreshold = 0.25;
@@ -107,6 +213,50 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     /// </summary>
     [ObservableProperty]
     private int _selectedModeIndex;
+
+    /// <summary>
+    /// The user changed the covers/all-pages selection — persist it so a fresh process
+    /// starts in the same mode.
+    /// </summary>
+    partial void OnSelectedModeIndexChanged(int value)
+    {
+        if (value == _settings.SearchMode)
+            return;
+        _settings.Save(_settings.OnnxThreadCount, _settings.GpuBatchSize, _settings.ThumbnailWidth,
+            _settings.MaxCachedThumbnails, _settings.MaxPreviews, value);
+    }
+
+    /// <summary>
+    /// The user moved the similarity threshold slider — persist it so a fresh process
+    /// starts with the same result filter.
+    /// </summary>
+    partial void OnSimilarityThresholdChanged(double value)
+    {
+        if (Math.Abs(value - _settings.SimilarityThreshold) < 1e-9)
+            return;
+        _settings.SaveSimilarityThreshold(value);
+    }
+
+    /// <summary>
+    /// A history phrase was picked from the dropdown — put it into the query box.
+    /// The selection is kept (the dropdown mirrors the box); manual editing clears it
+    /// via <see cref="OnQueryTextChanged"/>.
+    /// </summary>
+    partial void OnSelectedPhraseChanged(string? value)
+    {
+        if (value is not null)
+            QueryText = value;
+    }
+
+    /// <summary>
+    /// The query box no longer matches the selected history phrase (the user typed or
+    /// edited) — clear the dropdown selection so it stops mirroring stale text.
+    /// </summary>
+    partial void OnQueryTextChanged(string value)
+    {
+        if (SelectedPhrase is not null && value != SelectedPhrase)
+            SelectedPhrase = null;
+    }
 
     /// <summary>
     /// Index of the inner panel inside the Comic Search tab: 0 = Search settings,
@@ -161,7 +311,8 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             : _currentPhase;
     }
 
-    public ObservableCollection<ComicCoverItem> Results { get; } = new();
+    [ObservableProperty]
+    private ObservableCollection<ComicCoverItem> _results = new();
 
     /// <summary>
     /// True when the Results collection holds at least one item.
@@ -180,6 +331,10 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     /// on search start. Capped so a pathological library cannot grow it unboundedly.
     /// </summary>
     public ObservableCollection<string> ArchiveNotes { get; } = new();
+
+    // Guards the notes collection: in the app every mutation is dispatcher-marshalled,
+    // but under tests (no WPF dispatcher) status updates can apply concurrently.
+    private readonly object _notesLock = new();
 
     private const int MaxArchiveNotes = 500;
 
@@ -200,7 +355,8 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             [
                 new TabMenuItem("Vector cache: Info...", VectorCacheInfoCommand),
                 new TabMenuItem("Vector cache: Optimize", VectorCacheOptimizeCommand),
-                new TabMenuItem("Vector cache: Vacuum...", VectorCacheVacuumCommand)
+                new TabMenuItem("Vector cache: Vacuum...", VectorCacheVacuumCommand),
+                new TabMenuItem("Vector cache: Prune missing files...", VectorCachePruneMissingFilesCommand)
             ])
         };
 
@@ -213,17 +369,68 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     // ────────────────────────────── Commands ──────────────────────────────
 
     [RelayCommand]
-    private void BrowseDirectory()
+    private void AddDirectory()
     {
         var dialog = new OpenFolderDialog
         {
-            Title = "Select directory with comic archives (CBZ/CBR)"
+            Title = "Select directory with comic archives (CBZ/CBR/PDF)"
         };
 
-        if (dialog.ShowDialog() == true)
+        if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.FolderName)
+            && !SearchDirectories.Contains(dialog.FolderName))
         {
-            DirectoryPath = dialog.FolderName;
+            SearchDirectories.Add(dialog.FolderName);
+            PersistDirectories();
         }
+    }
+
+    [RelayCommand]
+    private void RemoveDirectory(string directory)
+    {
+        if (directory is not null && SearchDirectories.Remove(directory))
+            PersistDirectories();
+    }
+
+    private void PersistDirectories() => _settings.SaveSearchDirectories(SearchDirectories.ToList());
+
+    /// <summary>
+    /// Records a launched query in the phrase history: the phrase moves (or is inserted)
+    /// to the front — re-searching an existing phrase does not duplicate it — the list is
+    /// truncated to the last 10 and persisted. The dropdown collection is refreshed in
+    /// place so its binding picks up the change.
+    /// </summary>
+    private void RecordPhraseInHistory(string phrase)
+    {
+        // An editable ComboBox wipes its Text (which is bound TwoWay to QueryText)
+        // when a *selected* item is removed — after a first search WPF auto-matches
+        // the typed text to the now-first history item, so the Clear() below would
+        // erase the user's query. Snapshot it and restore after the refresh.
+        var query = QueryText;
+
+        var updated = new List<string>(PhraseHistory.Count);
+        updated.Add(phrase);
+        foreach (var existing in PhraseHistory)
+        {
+            if (string.Equals(existing, phrase, StringComparison.OrdinalIgnoreCase))
+                continue; // dedup: the phrase now sits at the front.
+            updated.Add(existing);
+            if (updated.Count == 10)
+                break;
+        }
+
+        _settings.SaveSearchPhraseHistory(updated);
+
+        bool unchanged = updated.Count == PhraseHistory.Count
+            && updated.SequenceEqual(PhraseHistory, StringComparer.OrdinalIgnoreCase);
+        if (unchanged)
+            return; // no collection churn — the ComboBox text stays untouched
+
+        PhraseHistory.Clear();
+        foreach (var item in updated)
+            PhraseHistory.Add(item);
+
+        if (!string.Equals(QueryText, query, StringComparison.Ordinal))
+            QueryText = query; // the ComboBox reset its text — put the query back
     }
 
     [RelayCommand(CanExecute = nameof(CanSearch), AllowConcurrentExecutions = false)]
@@ -237,19 +444,13 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
 
         _lastProgressUiUpdateUtc = DateTime.MinValue;
         _showingDetail = false;
-        _logger.LogInformation("SearchAsync started. ModeIndex={ModeIndex}, Directory='{Directory}', QueryLength={QueryLength}",
-            SelectedModeIndex, DirectoryPath, QueryText?.Length ?? 0);
+        _logger.LogInformation("SearchAsync started. ModeIndex={ModeIndex}, Directories='{Directories}', QueryLength={QueryLength}",
+            SelectedModeIndex, string.Join("; ", SearchDirectories), QueryText?.Length ?? 0);
 
         // Validate inputs
-        if (string.IsNullOrWhiteSpace(DirectoryPath))
+        if (SearchDirectories.Count == 0)
         {
-            StatusMessage = "Please select a directory with comic archives first.";
-            return;
-        }
-
-        if (!System.IO.Directory.Exists(DirectoryPath))
-        {
-            StatusMessage = $"Directory not found: {DirectoryPath}";
+            StatusMessage = "Please add a search directory first.";
             return;
         }
 
@@ -259,6 +460,10 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             return;
         }
 
+        // The list the search runs with is what the user wants remembered.
+        PersistDirectories();
+        RecordPhraseInHistory(QueryText);
+
         IsBusy = true;
         SelectedInnerTabIndex = 0; // show the settings/progress panel while the search runs
         int runId = Interlocked.Increment(ref _uiUpdateRunId);
@@ -267,8 +472,12 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         UpdateTaskbar();
         _thumbnailProvider.Clear();
         Results.Clear();
-        ArchiveNotes.Clear();
-        ArchiveNotesCount = 0;
+        CurrentFile = string.Empty;
+        lock (_notesLock)
+        {
+            ArchiveNotes.Clear();
+            ArchiveNotesCount = 0;
+        }
         ProgressCurrent = 0;
         ProgressTotal = 0;
 
@@ -291,12 +500,20 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
                 // Archive diagnostics (rare per-search events) — accumulate in the notes list.
                 if (s.Note is not null)
                 {
-                    ArchiveNotes.Add(s.Note);
-                    if (ArchiveNotes.Count > MaxArchiveNotes)
-                        ArchiveNotes.RemoveAt(0);
+                    lock (_notesLock)
+                    {
+                        ArchiveNotes.Add(s.Note);
+                        if (ArchiveNotes.Count > MaxArchiveNotes)
+                            ArchiveNotes.RemoveAt(0);
+                    }
                     ArchiveNotesCount = ArchiveNotes.Count;
                     OnPropertyChanged(nameof(ArchiveNotesCount));
                 }
+
+                // "Currently processing" file label — applied on every update (unthrottled
+                // in the VM; the service already rate-limits these reports).
+                if (s.CurrentFile is not null)
+                    CurrentFile = s.CurrentFile;
 
                 // Refresh the taskbar button on every status event (cheap: two property writes)
                 UpdateTaskbar();
@@ -365,36 +582,97 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             // Run on thread-pool so the UI thread is never blocked by IO or CPU work
             // (ScanArchivesRecursive, text-encoder init, GPU inference all happen off UI).
             // Progress<T> was constructed on UI thread and already marshals via Dispatcher.
+            IProgress<ComicSearchStatus> outerStatus = status; // interface view: Report is on IProgress
             List<ComicCoverResult> results = await Task.Run(async () =>
             {
-                if (currentMode == SearchMode.AllPages)
-                    return await _searchService.SearchAllPagesAsync(DirectoryPath, QueryText, status, ct).ConfigureAwait(false);
-                else
-                    return await _searchService.SearchAsync(DirectoryPath, QueryText, status, ct).ConfigureAwait(false);
+                var merged = new List<ComicCoverResult>();
+                var roots = SearchDirectories.ToList();
+                for (var i = 0; i < roots.Count; i++)
+                {
+                    var dir = roots[i];
+
+                    // Per-root phase marker: "Processing archives: <dir> (2/3)". During the
+                    // root the service's per-archive detail lines carry the directory prefix.
+                    outerStatus.Report(new ComicSearchStatus
+                    {
+                        Phase = $"Processing archives: {dir} ({i + 1}/{roots.Count})"
+                    });
+
+                    if (!System.IO.Directory.Exists(dir))
+                    {
+                        outerStatus.Report(new ComicSearchStatus { Note = $"Directory not found, skipped: {dir}" });
+                        continue;
+                    }
+
+                    var rootStatus = new Progress<ComicSearchStatus>(s =>
+                        outerStatus.Report(string.IsNullOrEmpty(s.Detail) ? s : s with { Detail = $"{dir} | {s.Detail}" }));
+
+                    if (currentMode == SearchMode.AllPages)
+                        merged.AddRange(await _searchService.SearchAllPagesAsync(dir, QueryText, rootStatus, ct).ConfigureAwait(false));
+                    else
+                        merged.AddRange(await _searchService.SearchAsync(dir, QueryText, rootStatus, ct).ConfigureAwait(false));
+                }
+
+                // Nested/overlapping roots can surface the same archive twice — de-duplicate
+                // by (archive, page) keeping the first occurrence, then rank globally.
+                return merged
+                    .GroupBy(r => (r.ArchivePath, r.PageIndex))
+                    .Select(g => g.First())
+                    .OrderByDescending(r => r.SimilarityScore)
+                    .ToList();
             }, ct);
 
             // Filter by similarity threshold
             var filtered = results.Where(r => r.SimilarityScore >= SimilarityThreshold).ToList();
 
+            // Pre-fetch only the FIRST tiles, up to the thumbnail cache limit: anything
+            // beyond it would be evicted from the LRU cache before the user scrolls there,
+            // so those tiles load on demand — the moment their tile becomes visible
+            // (item template behavior → RequestThumbnail, a priority bump in the pipeline).
+            // Pushed in reverse display order, so the LIFO pipeline fills the off-screen
+            // zone from the top of the list down — the natural scroll direction.
+
             _logger.LogDebug($"Populate the observable collection {filtered.Count}");
-            // Populate the observable collection and trigger thumbnail loads
-            foreach (var result in filtered)
+            // Build items outside the observable and assign the collection in one go below:
+            // a single CollectionChanged(Reset) instead of N per-item Adds, each of which
+            // used to run the VM's CollectionChanged handler (command refresh + 2x property
+            // notifications + tab-header re-render) on the UI thread.
+            // Every item starts with a same-size placeholder so later real-preview swaps
+            // re-render the cell only — no results-panel re-layout per preview.
+            var swPopulate = Stopwatch.StartNew();
+            var items = new List<ComicCoverItem>(filtered.Count);
+            for (var i = 0; i < filtered.Count; i++)
             {
+                var result = filtered[i];
                 var item = new ComicCoverItem
                 {
                     ArchivePath = result.ArchivePath,
                     ArchiveFileName = result.ArchiveFileName,
                     SimilarityScore = result.SimilarityScore,
                     PageIndex = result.PageIndex,
-                    PageCount = result.PageCount
+                    PageCount = result.PageCount,
+                    // keeps the image cell size stable until the preview is decoded; the
+                    // real thumbnail is swapped in when the tile becomes visible
+                    Thumbnail = _thumbnailProvider.GetPlaceholder()
                 };
 
-                // Extract the result page (cover for page 0) in memory and set the thumbnail when loaded
-                _thumbnailProvider.EnsurePageAndEnqueue(result.ArchivePath, result.PageIndex, b => item.Thumbnail = b);
- 
-                // Add to results (thumbnail callback will update UI when available)
-                Results.Add(item);
+                items.Add(item);
             }
+
+            // One bulk assignment → one CollectionChanged(Reset)
+            Results = new ObservableCollection<ComicCoverItem>(items);
+
+            // Background pre-fetch of the first tiles (up to the cache limit; see the
+            // note above the populate block).
+            var prefetchCount = Math.Min(items.Count, _settings.MaxCachedThumbnails);
+            for (var i = prefetchCount - 1; i >= 0; i--)
+            {
+                QueueThumbnail(items[i]);
+            }
+
+            _logger.LogWarning(
+                "[Perf] Results populated: {Shown} item(s) (filtered from {Total}), in {Ms} ms on UI thread",
+                items.Count, results.Count, swPopulate.ElapsedMilliseconds);
 
             if (Results.Count > 0)
             {
@@ -403,14 +681,21 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
                     $"scores: {filtered.Min(r => r.SimilarityScore):P1}–{filtered.Max(r => r.SimilarityScore):P1}, " +
                     $"median: {filtered.OrderBy(r => r.SimilarityScore).ElementAt(filtered.Count / 2).SimilarityScore:P1})";
                 SelectedInnerTabIndex = 1; // auto-switch to the full-height results panel
+                // Measure how long the UI thread is blocked by the results-panel
+                // materialization (container generation + WrapPanel layout + render) after
+                // the switch — "time until responsive again" for this result size.
+                _ = MeasureUiLatencyAsync();
             }
             else if (results.Count == 0)
             {
                 // No results at all — keep the service's final phase if it explains why
-                // (e.g. "No comic archives found in the selected directory").
-                StatusMessage = string.IsNullOrWhiteSpace(_currentPhase)
-                    ? "No matching results found."
-                    : _currentPhase;
+                // (e.g. "No comic archives found in the selected directory"); when every
+                // root was skipped (missing directory notes) the phase line is misleading.
+                StatusMessage = ArchiveNotes.Count > 0
+                    ? "No archives were processed — see notes."
+                    : string.IsNullOrWhiteSpace(_currentPhase)
+                        ? "No matching results found."
+                        : _currentPhase;
             }
             else
             {
@@ -431,11 +716,35 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             // Invalidate late progress/status callbacks from this run
             Interlocked.Increment(ref _uiUpdateRunId);
             IsBusy = false;
+            CurrentFile = string.Empty;
             UpdateTaskbar();
         }
     }
 
     private bool CanSearch() => !IsBusy;
+
+    /// <summary>
+    /// Perf probe: waits until the dispatcher can process a Background-priority (i.e.
+    /// post-layout/post-render) work item again and logs how long the UI thread was busy.
+    /// A large number right after the results switch means the one-shot materialization of
+    /// all result containers (non-virtualized WrapPanel) is the freeze source.
+    /// </summary>
+    private async Task MeasureUiLatencyAsync()
+    {
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher is null) return;
+
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            await dispatcher.InvokeAsync(() => { }, DispatcherPriority.Background);
+            _logger.LogWarning(
+                "[Perf] UI thread busy for {Ms} ms after results switch (results={Count}) " +
+                "— layout/input/render were blocked until now",
+                sw.ElapsedMilliseconds, Results.Count);
+        }
+        catch (Exception) { /* app shutting down */ }
+    }
 
     // ─────────────────────── Vector cache menu commands ───────────────────────
 
@@ -478,6 +787,21 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
 
         var result = await _vectorStore.VacuumAsync();
         MessageBox.Show(result.Detail, "Vector Cache — Vacuum", MessageBoxButton.OK,
+            result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+    }
+
+    [RelayCommand]
+    private async Task VectorCachePruneMissingFilesAsync()
+    {
+        var confirm = MessageBox.Show(
+            "Remove cache entries for files that no longer exist on disk?\n\n" +
+            "Only disks that are currently connected are checked. Files on disconnected " +
+            "drives (removable media, offline shares) are left in the cache.",
+            "Vector Cache — Prune missing files", MessageBoxButton.YesNo, MessageBoxImage.Question);
+        if (confirm != MessageBoxResult.Yes) return;
+
+        var result = await _vectorStore.PruneMissingFilesAsync();
+        MessageBox.Show(result.Detail, "Vector Cache — Prune missing files", MessageBoxButton.OK,
             result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
     }
 

@@ -20,6 +20,8 @@ public class ComicCoverSearchServiceTests
         _mockArchiveReader = new Mock<IArchiveReader>();
         _mockClipTextEncoder = new Mock<IClipTextEncoder>();
         _mockVectorStore = new Mock<IVectorStore>();
+        // The real store migrates the legacy cache on a background thread; tests must not wait.
+        _mockVectorStore.SetupGet(v => v.WhenReady).Returns(Task.CompletedTask);
         _mockDownloader = new Mock<IModelDownloader>();
         // Point to a non-existent path — tests that don't invoke inference won't load the model
         _mockDownloader.Setup(d => d.GetModelPath(It.IsAny<string>())).Returns("dummy.onnx");
@@ -101,17 +103,10 @@ public class ComicCoverSearchServiceTests
 
         var service = CreateService();
 
+        // The cover is cached: a fresh cover row answers the search without opening the archive
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.Is<List<(string FilePath, DateTime LastModified, long FileSize)>>(l =>
-                    l.Any(x => x.FilePath == comicPath))))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = path == comicPath ? CreateEmbedding(1f) : null;
-                return result;
-            });
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), comicPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));
 
         try
         {
@@ -142,15 +137,8 @@ public class ComicCoverSearchServiceTests
         var service = CreateService();
 
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = CreateEmbedding(1f);
-                return result;
-            });
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));
 
         try
         {
@@ -180,15 +168,8 @@ public class ComicCoverSearchServiceTests
         var service = CreateService();
 
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = CreateEmbedding(1f);
-                return result;
-            });
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));
 
         try
         {
@@ -217,15 +198,8 @@ public class ComicCoverSearchServiceTests
         var service = CreateService();
 
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = CreateEmbedding(1f);
-                return result;
-            });
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));
 
         try
         {
@@ -251,27 +225,53 @@ public class ComicCoverSearchServiceTests
         await File.WriteAllBytesAsync(cbzFile, []);
 
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = CreateEmbedding(1f);
-                return result;
-            });
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));
 
         var service = CreateService();
-        var updates = new List<ComicSearchStatus>();
+        // SyncProgress (lock-guarded recorder) — the service reports from producer and
+        // consumer threads, a plain List would race and lose updates.
+        var status = new SyncProgress<ComicSearchStatus>();
 
         try
         {
-            await service.SearchAsync(searchDir, "test",
-                new Progress<ComicSearchStatus>(p => updates.Add(p)));
+            await service.SearchAsync(searchDir, "test", status: status);
 
+            var updates = status.Values;
             Assert.NotEmpty(updates);
             Assert.Equal(1, updates.Last().Current);
             Assert.Equal(1, updates.Last().Total);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAsync_ReportsCurrentFileWhileProcessing()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var cbzFile = Path.Combine(searchDir, "test.cbz");
+        await File.WriteAllBytesAsync(cbzFile, []);
+
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));
+
+        var service = CreateService();
+        var status = new SyncProgress<ComicSearchStatus>();
+
+        try
+        {
+            await service.SearchAsync(searchDir, "test", status: status);
+
+            // The per-archive file report rides the raw channel with its own 250 ms
+            // throttle; the first report of a run always passes (never reported before),
+            // so the single archive's path must be observed.
+            Assert.Contains(status.Values, v => v.CurrentFile == cbzFile);
         }
         finally
         {
@@ -395,17 +395,10 @@ public class ComicCoverSearchServiceTests
             .Setup(r => r.OpenSessionAsync(comicPath))
             .ReturnsAsync(session.Object);
 
-        // Both pages are in the embedding cache — nothing must be extracted at all
+        // The archive row is fresh and holds both pages — nothing must be extracted at all
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = CreateEmbedding(1f);
-                return result;
-            });
+            .Setup(s => s.GetArchiveAsync(It.IsAny<string>(), comicPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .Returns(Task.FromResult<(int, float[][])?>((2, new[] { CreateEmbedding(1f), CreateEmbedding(2f) })));
 
         try
         {
@@ -452,50 +445,6 @@ public class ComicCoverSearchServiceTests
     }
 
     [Fact]
-    public async Task SearchAllPagesAsync_ExactlyHalfMisses_UsesPerPageExtraction()
-    {
-        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
-        Directory.CreateDirectory(searchDir);
-
-        var comicPath = Path.Combine(searchDir, "test.cbz");
-        await File.WriteAllBytesAsync(comicPath, []);
-
-        var service = CreateService();
-        var session = CreateSession(
-            ("01.jpg", (byte[]?)null), ("02.jpg", null), ("03.jpg", null), ("04.jpg", null));
-        _mockArchiveReader
-            .Setup(r => r.OpenSessionAsync(comicPath))
-            .ReturnsAsync(session.Object);
-
-        // Pages 0 and 1 are cached, pages 2 and 3 are misses — exactly half, so no bulk pass
-        _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = path.EndsWith("|page=0", StringComparison.Ordinal)
-                        || path.EndsWith("|page=1", StringComparison.Ordinal)
-                        ? CreateEmbedding(1f)
-                        : null;
-                return result;
-            });
-
-        try
-        {
-            await service.SearchAllPagesAsync(searchDir, "test");
-
-            session.Verify(s => s.ExtractAllToMemoryAsync(), Times.Never);
-            session.Verify(s => s.ExtractToMemoryAsync(It.IsAny<int>()), Times.Exactly(2));
-        }
-        finally
-        {
-            Directory.Delete(searchDir, true);
-        }
-    }
-
-    [Fact]
     public async Task SearchAllPagesAsync_CachedPagesProduceResultsWithPageCount()
     {
         var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
@@ -510,19 +459,10 @@ public class ComicCoverSearchServiceTests
             .Setup(r => r.OpenSessionAsync(comicPath))
             .ReturnsAsync(CreateSession(("01.jpg", (byte[]?)null), ("02.jpg", null)).Object);
 
-        // Both pages are in the embedding cache (keys "{path}|page=N") — no extraction needed
+        // A fresh archive row (the whole page array) answers the search without extraction
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .ReturnsAsync((string _, List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = path.StartsWith($"{comicPath}|page=", StringComparison.Ordinal)
-                        ? CreateEmbedding(1f)
-                        : null;
-                return result;
-            });
+            .Setup(s => s.GetArchiveAsync(It.IsAny<string>(), comicPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .Returns(Task.FromResult<(int, float[][])?>((2, new[] { CreateEmbedding(1f), CreateEmbedding(1f) })));
 
         try
         {
@@ -747,7 +687,10 @@ public class ComicCoverSearchServiceTests
                 return vec;
             });
 
-        // Mock vector store to return null (cache miss) and accept saves
+        // Mock vector store: no fresh archive/cover rows (cache misses) and accept saves.
+        // (The generic GetAsync/SaveAsync mocks below are kept for feature-cache tests
+        // that use the same interface; the search service itself only uses the
+        // archive/cover APIs.)
         _mockVectorStore
             .Setup(s => s.GetAsync(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<DateTime>(), It.IsAny<long>()))
@@ -757,16 +700,21 @@ public class ComicCoverSearchServiceTests
                 It.IsAny<DateTime>(), It.IsAny<long>(), It.IsAny<float[]>()))
             .Returns(Task.CompletedTask);
         _mockVectorStore
-            .Setup(s => s.GetBatchAsync(It.IsAny<string>(),
-                It.IsAny<List<(string FilePath, DateTime LastModified, long FileSize)>>()))
-            .Returns((string modelName,
-                List<(string FilePath, DateTime LastModified, long FileSize)> entries) =>
-            {
-                var result = new Dictionary<string, float[]?>();
-                foreach (var (path, _, _) in entries)
-                    result[path] = null;
-                return Task.FromResult(result);
-            });
+            .Setup(s => s.GetArchiveAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<DateTime>(), It.IsAny<long>()))
+            .Returns(Task.FromResult<(int, float[][])?>(null));
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync((float[]?)null);
+        _mockVectorStore
+            .Setup(s => s.SaveArchiveAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<int>(), It.IsAny<DateTime>(), It.IsAny<long>(), It.IsAny<float[][]>()))
+            .Returns(Task.CompletedTask);
+        _mockVectorStore
+            .Setup(s => s.SaveCoverAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<DateTime>(), It.IsAny<long>(), It.IsAny<float[]>()))
+            .Returns(Task.CompletedTask);
 
         // Default archive session: a single page whose extraction yields null —
         // tests that need real results either override the session per path or

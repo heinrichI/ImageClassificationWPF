@@ -85,7 +85,10 @@ public partial class AnalyzeViewModel : ObservableObject
         Clusters.Clear();
         TagResults.Clear();
 
+        // Cancel any in-flight operation from a previous run.
+        _cts?.Cancel();
         _cts = new CancellationTokenSource();
+        var ct = _cts.Token;
 
         try
         {
@@ -110,7 +113,7 @@ public partial class AnalyzeViewModel : ObservableObject
             });
 
             // Extract features (model loaded lazily inside service)
-            var features = await _featureExtractor.ExtractBatchAsync(imagePaths, progress);
+            var features = await _featureExtractor.ExtractBatchAsync(imagePaths, progress, ct);
 
             var featureArray = features.Select(f => f.Features).ToArray();
 
@@ -120,7 +123,7 @@ public partial class AnalyzeViewModel : ObservableObject
             }
             else
             {
-                await RunTagGenerationAsync(imagePaths);
+                await RunTagGenerationAsync(imagePaths, ct);
             }
         }
         catch (OperationCanceledException)
@@ -173,7 +176,7 @@ public partial class AnalyzeViewModel : ObservableObject
         await Task.CompletedTask;
     }
 
-    private async Task RunTagGenerationAsync(List<string> imagePaths)
+    private async Task RunTagGenerationAsync(List<string> imagePaths, CancellationToken ct)
     {
         StatusText = "Generating tags...";
 
@@ -194,7 +197,7 @@ public partial class AnalyzeViewModel : ObservableObject
             });
         });
 
-        var results = await _tagService.GenerateTagsAsync(imagePaths, tags, TopK, progress);
+        var results = await _tagService.GenerateTagsAsync(imagePaths, tags, TopK, progress, ct);
 
         Application.Current.Dispatcher.Invoke(() =>
         {
@@ -213,7 +216,9 @@ public partial class AnalyzeViewModel : ObservableObject
                 EditableTagResults.Add(editableItem);
             }
 
-            StatusText = $"Tagged {results.Count} images with {tags.Length} candidate tags. Review and edit, then Sort.";
+            StatusText = ct.IsCancellationRequested
+                ? $"Cancelled — tagged {results.Count} of {imagePaths.Count} images (partial results shown)"
+                : $"Tagged {results.Count} images with {tags.Length} candidate tags. Review and edit, then Sort.";
         });
     }
 

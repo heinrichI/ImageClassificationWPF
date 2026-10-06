@@ -26,7 +26,12 @@
             <TextBox Text="{Binding ThumbnailWidth, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,12"/>
 
             <TextBlock Text="Max Cached Thumbnails:" Margin="0,0,0,4"/>
-            <TextBox Text="{Binding MaxCachedThumbnails, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,20"/>
+            <TextBox Text="{Binding MaxCachedThumbnails, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
+            <TextBlock Text="Max Previews (top N get thumbnails):" Margin="0,0,0,4"/>
+            <TextBox Text="{Binding MaxPreviews, UpdateSourceTrigger=PropertyChanged}" Width="80" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBlock Foreground="Gray" FontSize="11" Margin="0,0,0,20" MaxWidth="460" TextWrapping="Wrap"
+                Text="All search results are listed in the grid (it is virtualized, so even thousands of entries scroll smoothly). Only the top N results get a real preview; the rest show placeholders — decoding thousands of page images keeps the app sluggish. Lower = less background work after very large searches. 0 = load a preview for every result. Applied from the next search."/>
 
             <!-- Model Downloads -->
             <TextBlock Text="Download Models" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8"/>

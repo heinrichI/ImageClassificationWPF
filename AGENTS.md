@@ -92,7 +92,7 @@ public static class ArchiveReaderServiceCollectionExtensions
 |---|---|---|
 | `ImageClassification.ArchiveReader` | `AddArchiveReader()` | `IArchiveReader` → `ArchiveReader` |
 | `ImageClassification.VectorStore` | `AddVectorStore()` | `IVectorStore` → `SqliteVectorStore` |
-| `ImageClassification.Core` | `AddImageClassificationCore()` | All 12 service interfaces + decorators + factories (15 entries total) |
+| `ImageClassification.Core` | `AddImageClassificationCore()` | All service interfaces + concrete registrations for decorator injection + factories (14 interface mappings: `IImageClassifier`, `IModelTrainer`, `IModelEvaluator`, `IImageSorter`, `IBatchImageEncoder`, `IClipImageEncoder`, `IClipTextEncoder`, `IImageFeatureExtractor`, `IClusterService`, `ITagService`, `IModelDownloader`, `IAppInitializationService`, `IComicCoverSearchService`, `IImageSearchService`) |
 
 ---
 
