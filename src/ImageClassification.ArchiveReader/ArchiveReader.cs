@@ -134,7 +134,9 @@ internal sealed class ArchiveReader : IArchiveReader
 
     /// <summary>
     /// Builds the UI-facing failure note: the exception message usually carries only the file
-    /// name, so substitute the full path for it.
+    /// name, so substitute the full path for it. Cryptic library messages are translated
+    /// into actionable text (e.g. .NET's "End of Central Directory record could not be
+    /// found" when a non-ZIP file wears a .cbz extension).
     /// </summary>
     internal static class ContainerFailureNotes
     {
@@ -144,19 +146,42 @@ internal sealed class ArchiveReader : IArchiveReader
             string message = ex.Message.Contains(fileName, StringComparison.OrdinalIgnoreCase)
                 ? ex.Message.Replace(fileName, archivePath, StringComparison.OrdinalIgnoreCase)
                 : $"{archivePath}: {ex.Message}";
+
+            // Translate the libraries' cryptic failures into human-readable, actionable text.
+            if (message.Contains("End of Central Directory record could not be found", StringComparison.Ordinal))
+                message = $"{archivePath}: not a valid ZIP archive (corrupted file or wrong extension).";
+            else if (message.Contains("Can not open the file as archive", StringComparison.Ordinal) ||
+                     message.Contains("Unable to open archive", StringComparison.Ordinal))
+                message = $"{archivePath}: cannot be opened as an archive (corrupted or unsupported format).";
+
             return $"{message} — skipped as empty";
         }
     }
 
     /// <summary>
-    /// Specific-format handler for zip-based containers (.cbz). ZipArchiveSession never throws from
-    /// its constructor (failures are captured in LastNote), so no try/catch is needed here.
+    /// Specific-format handler for zip-based containers (.cbz). Claims a .cbz only when the
+    /// file CONTENT is really a ZIP — a .cbz that is actually RAR/7z data (a common case for
+    /// misnamed comics) falls through to the 7-Zip handler, which reads RAR/7z natively and
+    /// reports a clear container-mismatch note instead of .NET's cryptic
+    /// "End of Central Directory record could not be found." ZipArchiveSession itself never
+    /// throws from its constructor for content it has accepted (failures captured in LastNote).
     /// </summary>
     internal sealed class ZipContainerHandler : IContainerHandler
     {
         public int Priority => 10;
 
-        public bool CanOpen(string path) => path.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase);
+        public bool CanOpen(string path) =>
+            path.EndsWith(".cbz", StringComparison.OrdinalIgnoreCase)
+            && IsZipContent(path);
+
+        /// <summary>
+        /// Content check: an unrecognized signature is still handed to the ZIP handler so its
+        /// (now human-readable) error surfaces, while RAR/7z/... signatures route to the 7-Zip
+        /// handler which actually understands them.
+        /// </summary>
+        private static bool IsZipContent(string path) =>
+            SevenZBulkExtractor.TryDetectHandler(path) is not { } detected
+                || detected == SevenZBulkExtractor.ZipHandlerId;
 
         public Task<IArchiveSession> OpenSessionAsync(string path)
         {
@@ -166,8 +191,10 @@ internal sealed class ArchiveReader : IArchiveReader
 
     /// <summary>
     /// Catch-all handler: 7z/zip/tar containers via SevenZipExtractor. Claims every file the specific
-    /// handlers did not (.cbr/.cb7/.cbt plus unknown extensions); container mismatches (e.g. a zip
-    /// inside a .cbr) are reported through LastNote, never thrown.
+    /// handlers did not (.cbr/.cb7/.cbt, mislabeled .cbz whose content is RAR/7z, and unknown
+    /// extensions); container mismatches (e.g. a zip inside a .cbr) are reported through LastNote,
+    /// never thrown. 7z.dll natively extracts classic RAR (v4) — the most common "really a .cbr"
+    /// case — while RAR5 cannot be decoded by 7-Zip at all and gets a dedicated note.
     /// </summary>
     internal sealed class SevenZipContainerHandler : IContainerHandler
     {
@@ -329,6 +356,9 @@ internal sealed class ArchiveReader : IArchiveReader
         /// how the archive is read, so a ZIP inside a .cbr opens fine — but surfacing the
         /// mismatch is how users find renamed/corrupt files. RAR and RAR5 count as one
         /// family (both are expected for .cbr/.cbt), so a RAR5 in a .cbr stays silent.
+        /// Classic RAR (v4) IS decodable by 7z.dll, so a RAR-in-.cbz still works and only
+        /// gets an informational mismatch note; RAR5 is not decodable by 7-Zip at all and
+        /// gets an explicit "re-pack as .cbz" hint.
         /// </summary>
         private void ReportContainerMismatchNote()
         {
@@ -343,6 +373,10 @@ internal sealed class ArchiveReader : IArchiveReader
             string name = SevenZBulkExtractor.ContainerName(detected);
             LastNote = $"{_archivePath}: {name} container inside " +
                        $"'{Path.GetExtension(_archivePath)}' — opened with {name} handler";
+
+            if (detected == SevenZBulkExtractor.Rar5HandlerId)
+                LastNote += "; 7-Zip cannot extract RAR5 — re-pack the file as a true .cbz (ZIP) archive";
+
             _logger?.LogInformation("[7z] {Note}", LastNote);
         }
 
@@ -450,8 +484,9 @@ internal sealed class ArchiveReader : IArchiveReader
 
         /// <summary>
         /// Extension-based guess, used only when the file signature is unrecognized.
-        /// .cbz files never reach this session (they use the managed ZipArchiveSession),
-        /// the mapping is kept for exotic/unknown containers only.
+        /// Mislabeled .cbz files (content that is not a ZIP) DO reach this session — the
+        /// content check in ZipContainerHandler routes them here — so the .cbz mapping is
+        /// still meaningful as a last-resort guess; otherwise it covers exotic containers.
         /// </summary>
         private static Guid GuessHandler(string path)
         {
