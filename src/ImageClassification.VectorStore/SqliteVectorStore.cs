@@ -146,7 +146,24 @@ internal sealed class SqliteVectorStore : IVectorStore
         var conn = _pool.Rent();
         try
         {
-            // Trigger: legacy comic rows exist and the new tables are still empty.
+            // Fast path first: the migration commits as ONE transaction (all-or-nothing),
+            // so non-empty new tables mean it already completed. This cheap check (~ms —
+            // two small index counts) must run BEFORE the legacy trigger scan, which is a
+            // full-table scan (leading-wildcard LIKE — no index) and on a large cache costs
+            // seconds on EVERY app startup for no reason.
+            using (var fresh = new SqliteCommand(
+                       "SELECT (SELECT COUNT(*) FROM archive_embeddings) + (SELECT COUNT(*) FROM cover_embeddings)"))
+            {
+                fresh.Connection = conn;
+                if (Convert.ToInt64(fresh.ExecuteScalar()) > 0)
+                {
+                    _logger?.LogDebug("[VectorStore] Migration: already migrated (new tables populated) — skipping");
+                    return;
+                }
+            }
+
+            // New tables are empty — the legacy trigger scan decides between
+            // "nothing to migrate" and "run the full migration".
             using (var trigger = new SqliteCommand(
                        "SELECT COUNT(*) FROM embeddings WHERE " +
                        "file_path LIKE '%|page=%' OR " +
@@ -162,12 +179,6 @@ internal sealed class SqliteVectorStore : IVectorStore
                     drop.ExecuteNonQuery();
                     return;
                 }
-
-                using var fresh = new SqliteCommand(
-                    "SELECT (SELECT COUNT(*) FROM archive_embeddings) + (SELECT COUNT(*) FROM cover_embeddings)");
-                fresh.Connection = conn;
-                if (Convert.ToInt64(fresh.ExecuteScalar()) > 0)
-                    return; // already migrated
             }
 
             // Known-complete archives per the legacy marker table: (model, archive) → page count.
