@@ -87,6 +87,8 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
 
 ### Comic Cover Search (Tab 6)
 - Search CBZ/CBR comic archives by semantic description
+- Source directories are added via the "Add..." button or by dragging folders from
+  Windows Explorer onto the "Select comic archive directories" panel
 - Uses CLIP ViT-B/32 ONNX model for text + image embeddings
 - Results ranked by cosine similarity (raw CLIP score)
 - Adjustable similarity threshold (default 0.25)
@@ -95,7 +97,8 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
 ### Search Image (Tab 7)
 - Search plain image files (JPG/JPEG/PNG/BMP/TIFF/WebP) by semantic description
 - Multiple source directories, scanned top-level or with subfolders
-  ("Recurse subfolders", persisted)
+  ("Recurse subfolders", persisted); directories are added via the "Add..." button or
+  by dragging folders from Windows Explorer onto the panel
 - Uses CLIP ViT-B/32 ONNX model. Image encoding is **batched exactly like Comic Search**:
   the "ClipViTB32" per-file vector cache (one row per photo, keyed by file path +
   mtime + size) is probed in a single batched round-trip; cache hits are scored

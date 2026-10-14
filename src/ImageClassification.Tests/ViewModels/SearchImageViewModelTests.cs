@@ -230,6 +230,32 @@ public class SearchImageViewModelTests : IDisposable
         _vm.RequestThumbnail(null); // must be a no-op
     }
 
+    [Fact]
+    public void AddDirectories_AddsValidDirectories_SkipsMissingAndDuplicates_Persists()
+    {
+        var newDir = System.IO.Directory.CreateTempSubdirectory("add-dirs-").FullName;
+        try
+        {
+            // Act: the payload a folder drag from Explorer would produce.
+            _vm.AddDirectoriesCommand.Execute(new[]
+            {
+                newDir,                       // valid → added
+                Path.Combine(_tempDir, "no-such-subdir"), // missing → skipped
+                _tempDir,                     // valid → added
+                _tempDir.ToUpperInvariant(),  // case-insensitive duplicate → skipped
+            });
+
+            // Assert
+            Assert.Equal(new[] { newDir, _tempDir }, _vm.SearchDirectories.ToArray());
+            // The list was persisted to the settings store exactly once with the same content.
+            Assert.Equal(_vm.SearchDirectories.ToList(), _settings.ImageSearchDirectories.ToList());
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(newDir, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary>
     /// Fake <see cref="IImageSearchService"/>: returns <see cref="Results"/> (or throws
     /// <see cref="Throw"/>) and records the calls/options it saw.

@@ -151,6 +151,46 @@ public class ComicCoverSearchViewModelTests
     }
 
     [Fact]
+    public void AddDirectories_AddsValidDirectories_SkipsMissingAndDuplicates_Persists()
+    {
+        // Arrange
+        var settings = new FakeUserSettingsStore();
+        var fakeService = new FakeSearchService(new List<ComicCoverResult>());
+        var thumbnailProvider = new ImageClassification.UI.Services.ThumbnailProvider(
+            NullLogger<ImageClassification.UI.Services.ThumbnailProvider>.Instance,
+            new FakeUserSettingsStore { ThumbnailWidth = 64, ThumbnailHeight = 96 },
+            fakeService);
+        var copyService = new ImageCopyService(Mock.Of<IArchiveReader>(), NullLogger<ImageCopyService>.Instance);
+        var vm = new ComicCoverSearchViewModel(
+            fakeService, Mock.Of<IVectorStore>(), NullLogger<ComicCoverSearchViewModel>.Instance,
+            thumbnailProvider, copyService, settings);
+
+        var dirA = System.IO.Directory.CreateTempSubdirectory("comic-add-a-").FullName;
+        var dirB = System.IO.Directory.CreateTempSubdirectory("comic-add-b-").FullName;
+        try
+        {
+            // Act: the payload a folder drag from Explorer would produce.
+            vm.AddDirectoriesCommand.Execute(new[]
+            {
+                dirA,                       // valid → added
+                Path.Combine(dirA, "no-such-subdir"), // missing → skipped
+                dirB,                       // valid → added
+                dirB.ToUpperInvariant(),    // case-insensitive duplicate → skipped
+            });
+
+            // Assert
+            Assert.Equal(new[] { dirA, dirB }, vm.SearchDirectories.ToArray());
+            // The list was persisted to the settings store with the same content.
+            Assert.Equal(vm.SearchDirectories.ToList(), settings.SearchDirectories.ToList());
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dirA, recursive: true); } catch { /* best effort */ }
+            try { System.IO.Directory.Delete(dirB, recursive: true); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
     public async Task SearchAsync_FiltersBySimilarityThreshold_Double()
     {
         // Arrange

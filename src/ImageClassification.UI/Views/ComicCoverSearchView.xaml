@@ -36,6 +36,18 @@
 
                     <!-- Directory selection -->
                     <GroupBox Header="1. Select comic archive directories" Grid.Row="0" Margin="0,0,0,5">
+                        <GroupBox.ToolTip>
+                            <TextBlock>
+                                Folders to search for comic archives (CBZ / CBR / PDF).
+                                <LineBreak />
+                                The list is remembered between app restarts.
+                                <LineBreak />
+                                You can also drag folders from Windows Explorer onto this panel.
+                            </TextBlock>
+                        </GroupBox.ToolTip>
+                        <i:Interaction.Behaviors>
+                            <bh:DropDirectoriesBehavior Command="{Binding AddDirectoriesCommand}" />
+                        </i:Interaction.Behaviors>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />

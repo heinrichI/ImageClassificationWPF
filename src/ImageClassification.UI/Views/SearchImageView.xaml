@@ -42,8 +42,13 @@
                                 Folders to search for plain image files (JPG / JPEG / PNG / BMP / TIFF / WebP).
                                 <LineBreak />
                                 The list is remembered between app restarts.
+                                <LineBreak />
+                                You can also drag folders from Windows Explorer onto this panel.
                             </TextBlock>
                         </GroupBox.ToolTip>
+                        <i:Interaction.Behaviors>
+                            <bh:DropDirectoriesBehavior Command="{Binding AddDirectoriesCommand}" />
+                        </i:Interaction.Behaviors>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />

@@ -376,12 +376,47 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             Title = "Select directory with comic archives (CBZ/CBR/PDF)"
         };
 
-        if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.FolderName)
-            && !SearchDirectories.Contains(dialog.FolderName))
-        {
-            SearchDirectories.Add(dialog.FolderName);
+        if (dialog.ShowDialog() == true && TryAddDirectory(dialog.FolderName))
             PersistDirectories();
-        }
+    }
+
+    /// <summary>
+    /// Drag-and-drop entry point (folders dragged from Windows Explorer onto the
+    /// directory panel — see DropDirectoriesBehavior): adds every valid,
+    /// non-duplicate directory at once and persists the list.
+    /// </summary>
+    [RelayCommand]
+    private void AddDirectories(string[]? directories)
+    {
+        if (directories is null)
+            return;
+
+        var added = false;
+        foreach (var directory in directories)
+            added |= TryAddDirectory(directory);
+
+        if (added)
+            PersistDirectories();
+    }
+
+    /// <summary>
+    /// Adds a directory to the list when it exists and is not already present
+    /// (case-insensitive, trailing-backslash-insensitive). Returns true when added.
+    /// </summary>
+    private bool TryAddDirectory(string? directory)
+    {
+        if (string.IsNullOrWhiteSpace(directory))
+            return false;
+
+        var path = DirectoryPaths.Normalize(directory);
+        if (!System.IO.Directory.Exists(path))
+            return false;
+
+        if (DirectoryPaths.IsDuplicate(SearchDirectories, path))
+            return false;
+
+        SearchDirectories.Add(path);
+        return true;
     }
 
     [RelayCommand]
