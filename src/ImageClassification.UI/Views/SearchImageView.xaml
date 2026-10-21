@@ -345,9 +345,10 @@
                                                    FontSize="11"
                                                    TextTrimming="CharacterEllipsis"
                                                    Margin="0,4,0,0" />
-                                        <!-- Click hint -->
+                                        <!-- Info line: original resolution | size of the displayed image
+                                             (the click hint until the pipeline reports it) -->
                                         <TextBlock Grid.Row="3"
-                                                   Text="(click to open)"
+                                                   Text="{Binding InfoText}"
                                                    FontSize="10"
                                                    Foreground="Gray"
                                                    HorizontalAlignment="Center" />

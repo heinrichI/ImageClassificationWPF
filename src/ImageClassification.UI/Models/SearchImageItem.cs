@@ -42,4 +42,15 @@ public class SearchImageItem : ObservableObject
 
     /// <summary>Percent-formatted similarity for display (e.g. "53.2%").</summary>
     public string SimilarityText => $"{SimilarityScore:P1}";
+
+    private string _infoText = Services.TileInfoText.Fallback;
+    /// <summary>
+    /// Line under the tile: original resolution and size of the displayed image
+    /// ("1920 × 1080 · 1.4 MB"); the click hint until the thumbnail pipeline reports it.
+    /// </summary>
+    public string InfoText
+    {
+        get => _infoText;
+        set => SetProperty(ref _infoText, value);
+    }
 }

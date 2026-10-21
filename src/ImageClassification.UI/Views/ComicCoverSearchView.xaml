@@ -338,9 +338,10 @@
                                                    Foreground="Gray"
                                                    TextAlignment="Center"
                                                    Margin="0,2,0,0" />
-                                        <!-- Click hint -->
+                                        <!-- Info line: original resolution | size of the displayed page
+                                             (the click hint until the pipeline reports it) -->
                                         <TextBlock Grid.Row="4"
-                                                   Text="(click to open)"
+                                                   Text="{Binding InfoText}"
                                                    FontSize="10"
                                                    Foreground="Gray"
                                                    HorizontalAlignment="Center" />

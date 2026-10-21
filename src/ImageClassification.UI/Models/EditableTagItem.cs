@@ -20,8 +20,8 @@ public partial class EditableTagItem : ObservableObject
     {
         if (string.IsNullOrEmpty(FilePath)) return;
 
-        var bitmap = provider.GetBitmap(FilePath, 80, b => Thumbnail = b);
-        if (bitmap != null) Thumbnail = bitmap;
+        var result = provider.GetBitmap(FilePath, 80, r => { if (r is not null && r.Value.Image is not null) Thumbnail = r.Value.Image; });
+        if (result is not null && result.Value.Image is not null) Thumbnail = result.Value.Image;
     }
 }
 

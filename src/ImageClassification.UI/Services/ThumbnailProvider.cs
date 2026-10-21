@@ -10,9 +10,21 @@ using System.Windows.Media.Imaging;
 using ImageClassification.Core.Services;
 using ImageClassification.UI.Configuration;
 using Microsoft.Extensions.Logging;
+using SixLabors.ImageSharp;
 
 namespace ImageClassification.UI.Services
 {
+    /// <summary>
+    /// Delivery payload of the thumbnail pipeline: the (width-scaled) preview plus the
+    /// ORIGINAL size of the displayed image. The original size is read from the raw source
+    /// (file header, or the extracted archive-page bytes) because the scaled bitmap no longer
+    /// carries it. Width/Height are 0 when the source format could not be identified;
+    /// ByteSize is the size of the displayed image in bytes (file size on disk, or the
+    /// extracted page size for archive pages) and 0 when unknown.
+    /// </summary>
+    public readonly record struct ThumbnailResult(BitmapSource? Image, int Width, int Height, long ByteSize);
+
+
     /// <summary>
     /// Thumbnail pipeline (AntiDupl parity + archive-aware extensions):
     /// extraction (slow archive IO) and decode (single worker) are both LIFO, and a repeat
@@ -33,9 +45,11 @@ namespace ImageClassification.UI.Services
         // eviction) and entries beyond MaxCachedThumbnails are evicted from the front.
         // All access happens under _cacheLock (UI thread reads, worker thread adds).
         // Cache keys are "{source}#{width}" so a width change in the settings can never
-        // serve a bitmap decoded at a different size.
+        // serve a bitmap decoded at a different size. Each entry also stores the original
+        // size of the source (width/height/byte size) so a cache hit — which never goes
+        // through the decode worker — still delivers it.
         private readonly object _cacheLock = new();
-        private readonly Dictionary<string, BitmapSource> _cache = new();
+        private readonly Dictionary<string, ThumbnailResult> _cache = new();
         private readonly List<string> _cacheOrder = new();
 
         // Lock order (never take them in the reverse direction):
@@ -271,11 +285,17 @@ namespace ImageClassification.UI.Services
             return page > 1 ? $"{name} (page {page})" : name;
         }
 
-        public void Enqueue(string path, int width, Action<BitmapSource?>? callback = null)
+        public void Enqueue(string path, int width, Action<ThumbnailResult?>? callback = null)
         {
             if (string.IsNullOrEmpty(path)) return;
             var targetWidth = width > 0 ? width : _settings.ThumbnailWidth;
-            if (CacheTryGet(KeyWithWidth(path, targetWidth), out _)) return; // already loaded — the access marks it hot
+            if (CacheTryGet(KeyWithWidth(path, targetWidth), out var cached))
+            {
+                // Already loaded — deliver the cached result (bitmap AND original size).
+                // A silent return here used to leave brand-new items on the placeholder.
+                Deliver(cached.Value, callback);
+                return;
+            }
             DecodeQueuePush(new WorkItem
             {
                 CacheKey = KeyWithWidth(path, targetWidth),
@@ -286,20 +306,28 @@ namespace ImageClassification.UI.Services
             });
         }
 
-        public BitmapSource? GetBitmap(string path, int width, Action<BitmapSource?>? onLoaded = null)
+        /// <summary>Marshals a cache-hit delivery to the UI thread (callbacks touch bound items).</summary>
+        private static void Deliver(ThumbnailResult result, Action<ThumbnailResult?>? callback)
+        {
+            if (callback is null) return;
+            PostToUi(() => callback(result));
+        }
+
+        public ThumbnailResult? GetBitmap(string path, int width, Action<ThumbnailResult?>? onLoaded = null)
         {
             var targetWidth = width > 0 ? width : _settings.ThumbnailWidth;
 
             if (string.IsNullOrEmpty(path))
             {
                 var placeholder = CreatePlaceholder(targetWidth, _settings.ThumbnailHeight);
-                onLoaded?.Invoke(placeholder);
-                return placeholder;
+                var result = new ThumbnailResult(placeholder, 0, 0, 0);
+                onLoaded?.Invoke(result);
+                return result;
             }
 
-            if (CacheTryGet(KeyWithWidth(path, targetWidth), out var bs))
+            if (CacheTryGet(KeyWithWidth(path, targetWidth), out var cached))
             {
-                return bs;
+                return cached;
             }
 
             // queue background load and return placeholder
@@ -312,8 +340,9 @@ namespace ImageClassification.UI.Services
                 Generation = Volatile.Read(ref _generation)
             });
             var ph = CreatePlaceholder(targetWidth, _settings.ThumbnailHeight);
-            onLoaded?.Invoke(ph);
-            return ph;
+            var phResult = new ThumbnailResult(ph, 0, 0, 0);
+            onLoaded?.Invoke(phResult);
+            return phResult;
         }
 
         /// <summary>
@@ -357,7 +386,7 @@ namespace ImageClassification.UI.Services
         /// front of the respective queue — this is how the UI signals "this tile is on
         /// screen right now" without triggering duplicate archive IO.
         /// </summary>
-        public void EnsurePageAndEnqueue(string archivePath, int pageIndex, Action<BitmapSource?>? onLoaded = null)
+        public void EnsurePageAndEnqueue(string archivePath, int pageIndex, Action<ThumbnailResult?>? onLoaded = null)
         {
             if (string.IsNullOrEmpty(archivePath)) return;
             if (pageIndex < 0) pageIndex = 0;
@@ -366,7 +395,13 @@ namespace ImageClassification.UI.Services
             int width = _settings.ThumbnailWidth;
             string cacheKey = KeyWithWidth(sourceKey, width);
 
-            if (CacheTryGet(cacheKey, out _)) return; // already loaded — the access marks it hot
+            if (CacheTryGet(cacheKey, out var cached))
+            {
+                // Already loaded — deliver the cached result (bitmap AND original size) instead
+                // of silently returning (a silent return left brand-new items on the placeholder).
+                Deliver(cached.Value, onLoaded);
+                return;
+            }
 
             TileTask tile;
             bool startNew;
@@ -408,12 +443,12 @@ namespace ImageClassification.UI.Services
         }
 
         /// <summary>One extraction task: wait for the gate grant (if parked), extract the page, hand the bytes to the decode queue. Work finishing after the search generation changed (Clear) discards its result.</summary>
-        private async Task RunExtractionAsync(TileTask tile, string archivePath, int pageIndex, string sourceKey, string cacheKey, int width, Action<BitmapSource?>? onLoaded)
+        private async Task RunExtractionAsync(TileTask tile, string archivePath, int pageIndex, string sourceKey, string cacheKey, int width, Action<ThumbnailResult?>? onLoaded)
         {
             int gen = Volatile.Read(ref _generation);
             try
             {
-                if (CacheTryGet(cacheKey, out _))
+                if (CacheTryGet(cacheKey, out var cached))
                 {
                     // Loaded meanwhile. Release the slot only if we actually held one
                     // (a parked, ungranted waiter must NOT hand a slot to someone else).
@@ -430,6 +465,7 @@ namespace ImageClassification.UI.Services
                     {
                         LifoRelease();
                     }
+                    Deliver(cached.Value, onLoaded); // this request's item still needs the bitmap
                     return;
                 }
 
@@ -596,7 +632,7 @@ namespace ImageClassification.UI.Services
         }
 
         /// <summary>LRU get: a hit moves the key to the most-recently-used end.</summary>
-        private bool CacheTryGet(string key, out BitmapSource? image)
+        private bool CacheTryGet(string key, out ThumbnailResult? entry)
         {
             lock (_cacheLock)
             {
@@ -604,28 +640,28 @@ namespace ImageClassification.UI.Services
                 {
                     _cacheOrder.Remove(key);
                     _cacheOrder.Add(key);
-                    image = hit;
+                    entry = hit;
                     return true;
                 }
-                image = null;
+                entry = null;
                 return false;
             }
         }
 
         /// <summary>Adds an entry and evicts the least recently used entries beyond the limit.</summary>
-        private void CacheAdd(string key, BitmapSource image, int maxCached)
+        private void CacheAdd(string key, ThumbnailResult entry, int maxCached)
         {
             lock (_cacheLock)
             {
                 if (_cache.ContainsKey(key))
                 {
-                    _cache[key] = image;
+                    _cache[key] = entry;
                     _cacheOrder.Remove(key);
                     _cacheOrder.Add(key);
                     return;
                 }
 
-                _cache[key] = image;
+                _cache[key] = entry;
                 _cacheOrder.Add(key);
 
                 while (maxCached > 0 && _cache.Count > maxCached)
@@ -634,6 +670,35 @@ namespace ImageClassification.UI.Services
                     _cacheOrder.RemoveAt(0);
                     _cache.Remove(oldest);
                 }
+            }
+        }
+
+        /// <summary>Original pixel size from the raw page bytes (header-only parse, no pixel decode); (0, 0) when the format is unknown.</summary>
+        private static (int Width, int Height) TryIdentifySize(byte[] data)
+        {
+            try
+            {
+                using var ms = new MemoryStream(data);
+                var info = Image.Identify(ms);
+                return (info.Width, info.Height);
+            }
+            catch
+            {
+                return (0, 0);
+            }
+        }
+
+        /// <summary>Original pixel size from the file (header-only parse, no pixel decode); (0, 0) when the format is unknown.</summary>
+        private static (int Width, int Height) TryIdentifySize(string path)
+        {
+            try
+            {
+                var info = Image.Identify(path);
+                return (info.Width, info.Height);
+            }
+            catch
+            {
+                return (0, 0);
             }
         }
 
@@ -769,7 +834,26 @@ namespace ImageClassification.UI.Services
                                 image = bmp;
                             }
 
-                            CacheAdd(work.CacheKey, image, _settings.MaxCachedThumbnails);
+                            // Original size of the displayed image: the scaled bitmap above no
+                            // longer carries it, so read it from the raw source — the extracted
+                            // page bytes for archive results, the file itself otherwise. Header-only
+                            // parse (no pixel decode); ByteSize = page bytes / file size on disk.
+                            int srcWidth = 0, srcHeight = 0;
+                            long srcBytes = 0;
+                            if (work.Data is not null)
+                            {
+                                srcBytes = work.Data.Length;
+                                (srcWidth, srcHeight) = TryIdentifySize(work.Data);
+                            }
+                            else
+                            {
+                                try { srcBytes = new FileInfo(work.SourceKey).Length; }
+                                catch { /* best effort — the size line simply falls back */ }
+                                (srcWidth, srcHeight) = TryIdentifySize(work.SourceKey);
+                            }
+                            var result = new ThumbnailResult(image, srcWidth, srcHeight, srcBytes);
+
+                            CacheAdd(work.CacheKey, result, _settings.MaxCachedThumbnails);
 
                             var decodedTotal = Interlocked.Increment(ref _decodedTotal);
                             var nowUtc = DateTime.UtcNow;
@@ -783,7 +867,7 @@ namespace ImageClassification.UI.Services
 
                             if (work.Callback is not null)
                             {
-                                PostToUi(() => work.Callback(image));
+                                PostToUi(() => work.Callback(result));
                             }
 
                             if (work.Tile is not null)
@@ -830,7 +914,7 @@ namespace ImageClassification.UI.Services
             public string SourceKey = string.Empty;
             public byte[]? Data; // null = decode straight from the SourceKey file
             public int Width;
-            public Action<BitmapSource?>? Callback;
+            public Action<ThumbnailResult?>? Callback;
             public TileTask? Tile; // null for file-only Enqueue/GetBitmap requests
             public int Generation; // search generation the item was queued for (Clear() bumps it)
         }

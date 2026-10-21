@@ -120,7 +120,13 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     private void QueueThumbnail(ComicCoverItem item)
     {
         _thumbnailProvider.EnsurePageAndEnqueue(item.ArchivePath, item.PageIndex,
-            b => { if (b is not null) item.Thumbnail = b; });
+            r =>
+            {
+                if (r is null) return;
+                var res = r.Value;
+                if (res.Image is not null) item.Thumbnail = res.Image;
+                item.InfoText = TileInfoText.Format(res.Width, res.Height, res.ByteSize);
+            });
     }
 
     /// <summary>
@@ -1049,4 +1055,15 @@ public class ComicCoverItem : ObservableObject
     }
 
     public string PageLabel => PageCount > 0 ? $"Page {PageIndex + 1} of {PageCount}" : string.Empty;
+
+    private string _infoText = ImageClassification.UI.Services.TileInfoText.Fallback;
+    /// <summary>
+    /// Line under the tile: original resolution and size of the displayed page
+    /// ("1920 × 1080 · 1.4 MB"); the click hint until the thumbnail pipeline reports it.
+    /// </summary>
+    public string InfoText
+    {
+        get => _infoText;
+        set => SetProperty(ref _infoText, value);
+    }
 }

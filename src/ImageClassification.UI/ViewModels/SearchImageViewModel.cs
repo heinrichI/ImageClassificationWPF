@@ -94,7 +94,13 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
     private void QueueImageThumbnail(SearchImageItem item)
     {
         _thumbnailProvider.Enqueue(item.FilePath, _settings.ThumbnailWidth,
-            b => { if (b is not null) item.Thumbnail = b; });
+            r =>
+            {
+                if (r is null) return;
+                var res = r.Value;
+                if (res.Image is not null) item.Thumbnail = res.Image;
+                item.InfoText = TileInfoText.Format(res.Width, res.Height, res.ByteSize);
+            });
     }
 
     /// <summary>

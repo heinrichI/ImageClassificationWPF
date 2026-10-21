@@ -25,19 +25,23 @@ namespace ImageClassification.Tests.Services;
 public class ThumbnailProviderTests : IDisposable
 {
     public void Dispose() { }
-    /// <summary>Valid 1x1 RGBA PNG.</summary>
-    private static readonly byte[] Png1x1 =
+    /// <summary>
+    /// Valid 1x1 RGBA PNG generated with the WPF encoder: WIC (the decoder under test) and
+    /// ImageSharp (the original-size identifier) both require a valid CRC — the previous
+    /// hard-coded fixture passed WIC's lenient decoder but ImageSharp rejected its IDAT.
+    /// </summary>
+    private static readonly byte[] Png1x1 = MakePng1x1();
+
+    private static byte[] MakePng1x1()
     {
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
-        0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41,
-        0x54, 0x78, 0x9C, 0x62, 0x60, 0x00, 0x01, 0x00,
-        0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4,
-        0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
-        0xAE, 0x42, 0x60, 0x82
-    };
+        var src = BitmapSource.Create(1, 1, 96, 96, PixelFormats.Pbgra32, null, new byte[] { 0, 0, 0, 255 }, 4);
+        src.Freeze();
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(src));
+        using var ms = new MemoryStream();
+        encoder.Save(ms);
+        return ms.ToArray();
+    }
 
     /// <summary>
     /// Fake cover service whose extraction of each archive can be gated by the test
@@ -99,9 +103,9 @@ public class ThumbnailProviderTests : IDisposable
 
         try
         {
-            provider.Enqueue(c, 32, img => Cb("c", img));
-            provider.Enqueue(b, 32, img => Cb("b", img));
-            provider.Enqueue(a, 32, img => Cb("a", img));
+            provider.Enqueue(c, 32, r => Cb("c", r?.Image));
+            provider.Enqueue(b, 32, r => Cb("b", r?.Image));
+            provider.Enqueue(a, 32, r => Cb("a", r?.Image));
 
             var deadline = DateTime.UtcNow.AddSeconds(5);
             while (true)
@@ -140,8 +144,8 @@ public class ThumbnailProviderTests : IDisposable
         var svc = new GateCoverService();
         using var provider = CreateProvider(svc);
 
-        var results64 = new List<BitmapSource?>();
-        var results128 = new List<BitmapSource?>();
+        var results64 = new List<ThumbnailResult?>();
+        var results128 = new List<ThumbnailResult?>();
         var lock64 = new object();
         var lock128 = new object();
 
@@ -149,8 +153,8 @@ public class ThumbnailProviderTests : IDisposable
         {
             // Each GetBitmap reports the placeholder immediately; a miss then enqueues a
             // decode whose completion reports the real bitmap (second callback).
-            provider.GetBitmap(file, 64, b => { lock (lock64) results64.Add(b); });
-            provider.GetBitmap(file, 128, b => { lock (lock128) results128.Add(b); });
+            provider.GetBitmap(file, 64, r => { lock (lock64) results64.Add(r); });
+            provider.GetBitmap(file, 128, r => { lock (lock128) results128.Add(r); });
 
             var deadline = DateTime.UtcNow.AddSeconds(5);
             while (true)
@@ -169,7 +173,8 @@ public class ThumbnailProviderTests : IDisposable
             lock (lock128) Assert.True(results128.Count >= 2, $"128-wide callbacks: {results128.Count}");
 
             lock (lock128)
-                Assert.All(results128.Where(b => b is not null), b => Assert.Equal(128, b!.PixelWidth));
+                Assert.All(results128.Where(r => r?.Image is not null),
+                    r => Assert.Equal(128, r!.Value.Image!.PixelWidth));
         }
         finally
         {
@@ -189,15 +194,15 @@ public class ThumbnailProviderTests : IDisposable
         svc.Arm("c", Png1x1);
         using var provider = CreateProvider(svc);
 
-        var cbSlow = new List<BitmapSource?>();
-        var cbB = new List<BitmapSource?>();
-        var cbC = new List<BitmapSource?>();
+        var cbSlow = new List<ThumbnailResult?>();
+        var cbB = new List<ThumbnailResult?>();
+        var cbC = new List<ThumbnailResult?>();
         var lck = new object();
-        Action<BitmapSource?> To(List<BitmapSource?> l, object lck)
+        Action<ThumbnailResult?> To(List<ThumbnailResult?> l, object lck)
         {
-            return image =>
+            return result =>
             {
-                lock (lck) l.Add(image);
+                lock (lck) l.Add(result);
             };
         }
 
@@ -338,9 +343,9 @@ public class ThumbnailProviderTests : IDisposable
                     lock (orderLock) orderAttempt.Add(tag);
                 }
 
-                providerAttempt.EnsurePageAndEnqueue("slow", 0, img => CbAttempt("slow", img));
-                providerAttempt.EnsurePageAndEnqueue("a", 0, img => CbAttempt("a", img));
-                providerAttempt.EnsurePageAndEnqueue("b", 0, img => CbAttempt("b", img));
+                providerAttempt.EnsurePageAndEnqueue("slow", 0, r => CbAttempt("slow", r?.Image));
+                providerAttempt.EnsurePageAndEnqueue("a", 0, r => CbAttempt("a", r?.Image));
+                providerAttempt.EnsurePageAndEnqueue("b", 0, r => CbAttempt("b", r?.Image));
 
                 svcAttempt.Complete("slow");
                 await WaitForAsync(
@@ -362,7 +367,7 @@ public class ThumbnailProviderTests : IDisposable
                     continue;
 
                 // a becomes visible — a repeat request is a priority bump in the decode queue.
-                providerAttempt.EnsurePageAndEnqueue("a", 0, img => CbAttempt("a", img));
+                providerAttempt.EnsurePageAndEnqueue("a", 0, r => CbAttempt("a", r?.Image));
 
                 var d2 = DateTime.UtcNow.AddSeconds(10);
                 while (true)
@@ -401,7 +406,7 @@ public class ThumbnailProviderTests : IDisposable
         try
         {
             var loaded = 0;
-            provider.EnsurePageAndEnqueue(file, 0, b => { if (b is BitmapImage) Interlocked.Increment(ref loaded); });
+            provider.EnsurePageAndEnqueue(file, 0, r => { if (r is not null && r.Value.Image is BitmapImage) Interlocked.Increment(ref loaded); });
 
             var deadline = DateTime.UtcNow.AddSeconds(5);
             while (Volatile.Read(ref loaded) < 1 && DateTime.UtcNow < deadline)
@@ -476,6 +481,141 @@ public class ThumbnailProviderTests : IDisposable
             {
                 try { File.Delete(f); } catch { /* best effort */ }
             }
+        }
+    }
+
+    [Fact]
+    public async Task Enqueue_ReportsOriginalSize_AndByteSize_FromFile()
+    {
+        // The decode worker must report the ORIGINAL size of the source file (the thumbnail
+        // is width-scaled and no longer carries it) plus the file size in bytes.
+        var file = Path.Combine(Path.GetTempPath(), $"ics_thumb_origsize_{Guid.NewGuid():N}.png");
+        File.WriteAllBytes(file, Png1x1);
+        var expectedBytes = new FileInfo(file).Length;
+
+        var svc = new GateCoverService();
+        using var provider = CreateProvider(svc);
+
+        var results = new List<ThumbnailResult?>();
+        var lck = new object();
+        try
+        {
+            provider.Enqueue(file, 64, r => { lock (lck) results.Add(r); });
+
+            var deadline = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                int n; lock (lck) n = results.Count;
+                if (n >= 1 || DateTime.UtcNow > deadline) break;
+                await Task.Delay(10);
+            }
+
+            lock (lck)
+            {
+                Assert.NotNull(results[0]);
+                Assert.NotNull(results[0]!.Value.Image);
+                Assert.Equal(1, results[0]!.Value.Width);   // Png1x1
+                Assert.Equal(1, results[0]!.Value.Height);
+                Assert.Equal(expectedBytes, results[0]!.Value.ByteSize);
+            }
+        }
+        finally
+        {
+            try { File.Delete(file); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task Enqueue_CacheHit_DeliversCachedResult_IncludingOriginalSize()
+    {
+        // A second request for an already-decoded source must be served from the cache and
+        // still deliver the original size — a silent return here used to leave brand-new
+        // items on the placeholder with no size line.
+        var file = Path.Combine(Path.GetTempPath(), $"ics_thumb_cachehit_{Guid.NewGuid():N}.png");
+        File.WriteAllBytes(file, Png1x1);
+        var expectedBytes = new FileInfo(file).Length;
+
+        var svc = new GateCoverService();
+        using var provider = CreateProvider(svc);
+
+        var first = new List<ThumbnailResult?>();
+        var firstLck = new object();
+        try
+        {
+            provider.Enqueue(file, 64, r => { lock (firstLck) first.Add(r); });
+
+            var d1 = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                int n; lock (firstLck) n = first.Count;
+                if (n >= 1 || DateTime.UtcNow > d1) break;
+                await Task.Delay(10);
+            }
+
+            // A fresh callback for the same source — must be answered from the cache.
+            var second = new List<ThumbnailResult?>();
+            var secondLck = new object();
+            provider.Enqueue(file, 64, r => { lock (secondLck) second.Add(r); });
+
+            var d2 = DateTime.UtcNow.AddSeconds(5);
+            while (true)
+            {
+                int n; lock (secondLck) n = second.Count;
+                if (n >= 1 || DateTime.UtcNow > d2) break;
+                await Task.Delay(10);
+            }
+
+            lock (firstLck)
+            {
+                Assert.NotNull(first[0]);
+                Assert.Equal(1, first[0]!.Value.Width);
+                Assert.Equal(expectedBytes, first[0]!.Value.ByteSize);
+            }
+
+            lock (secondLck)
+            {
+                Assert.True(second.Count >= 1, "a cache hit must deliver the cached result to the new callback");
+                Assert.NotNull(second[0]);
+                Assert.Equal(expectedBytes, second[0]!.Value.ByteSize);
+                lock (firstLck)
+                    Assert.Same(first[0]!.Value.Image, second[0]!.Value.Image); // same cached bitmap
+            }
+        }
+        finally
+        {
+            try { File.Delete(file); } catch { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public async Task EnsurePageAndEnqueue_ReportsPageSize_FromInMemoryBytes()
+    {
+        // Archive results have no file on disk: the original size and byte count must come
+        // from the extracted in-memory page bytes.
+        var svc = new GateCoverService();
+        svc.Arm("p", Png1x1);
+        using var provider = CreateProvider(svc);
+
+        var results = new List<ThumbnailResult?>();
+        var lck = new object();
+        provider.EnsurePageAndEnqueue("p", 0, r => { lock (lck) results.Add(r); });
+        svc.Complete("p");
+
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (true)
+        {
+            int n; lock (lck) n = results.Count;
+            if (n >= 1 || DateTime.UtcNow > deadline) break;
+            await Task.Delay(10);
+        }
+
+        lock (lck)
+        {
+            Assert.NotNull(results[0]);
+            Assert.NotNull(results[0]!.Value.Image);
+            Assert.Equal(1, results[0]!.Value.Width);
+            Assert.Equal(1, results[0]!.Value.Height);
+            Assert.Equal(Png1x1.Length, results[0]!.Value.ByteSize);
         }
     }
 
