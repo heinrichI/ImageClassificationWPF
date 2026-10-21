@@ -39,6 +39,8 @@ internal sealed class FakeUserSettingsStore : IUserSettingsStore
     public IReadOnlyList<string> ImageSearchPhraseHistory { get; set; } = Array.Empty<string>();
     public double ImageSearchSimilarityThreshold { get; set; } = 0.25;
     public bool ImageSearchRecurseSubfolders { get; set; } = true;
+    public string CudaPath { get; set; } = string.Empty;
+    public string CudnnPath { get; set; } = string.Empty;
     public string File => "fake-user-settings.json";
 
     public void Save(int onnxThreadCount, int gpuBatchSize, int thumbnailWidth, int maxCachedThumbnails, int maxPreviews, int searchMode)
@@ -84,5 +86,11 @@ internal sealed class FakeUserSettingsStore : IUserSettingsStore
     public void SaveImageSearchRecurseSubfolders(bool value)
     {
         ImageSearchRecurseSubfolders = value;
+    }
+
+    public void SaveGpuPaths(string? cudaPath, string? cudnnPath)
+    {
+        CudaPath = cudaPath?.Trim() ?? string.Empty;
+        CudnnPath = cudnnPath?.Trim() ?? string.Empty;
     }
 }

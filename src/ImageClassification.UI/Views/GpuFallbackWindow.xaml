@@ -1,0 +1,42 @@
+<Window x:Class="ImageClassification.UI.Views.GpuFallbackWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="GPU (CUDA) not available"
+        Width="640" SizeToContent="Height" ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False">
+    <StackPanel Margin="16">
+        <TextBlock TextWrapping="Wrap" Foreground="Gray" Margin="0,0,0,12"
+                   Text="ONNX Runtime is running on CPU: the CUDA execution provider could not be loaded (CUDA or cuDNN libraries were not found). Point the app at the CUDA and cuDNN bin directories below — empty fields are auto-detected in the background from the NVIDIA registry and typical install locations. The paths are saved to user-settings.json and applied after the app is restarted." />
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="90" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition />
+                <RowDefinition />
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" Text="CUDA bin" VerticalAlignment="Center" Foreground="Gray" />
+            <TextBox  Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalContentAlignment="Center"
+                      Text="{Binding CudaPath, UpdateSourceTrigger=PropertyChanged}" />
+            <Button  Grid.Row="0" Grid.Column="2" Content="Browse…" Margin="4,4,0,4" Padding="10,3"
+                      Command="{Binding BrowseCudaCommand}" />
+
+            <TextBlock Grid.Row="1" Grid.Column="0" Text="cuDNN bin" VerticalAlignment="Center" Foreground="Gray" />
+            <TextBox  Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalContentAlignment="Center"
+                      Text="{Binding CudnnPath, UpdateSourceTrigger=PropertyChanged}" />
+            <Button  Grid.Row="1" Grid.Column="2" Content="Browse…" Margin="4,4,0,4" Padding="10,3"
+                      Command="{Binding BrowseCudnnCommand}" />
+        </Grid>
+
+        <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" Margin="0,8,0,0" />
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Save" Command="{Binding SaveCommand}" Padding="18,4" Margin="0,0,8,0" />
+            <Button Content="Close" Click="Close_Click" Padding="18,4" IsCancel="True" />
+        </StackPanel>
+    </StackPanel>
+</Window>

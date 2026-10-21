@@ -21,6 +21,7 @@ internal sealed class BatchImageEncoder : IBatchImageEncoder
     private readonly ILogger<BatchImageEncoder> _logger;
     private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
     private readonly IGpuPipelineOptions _gpuOptions;
+    private readonly IGpuFallbackNotifier? _gpuFallback;
     private InferenceSession? _session;
     private int _imageSize = 224;
     private bool _initialized;
@@ -44,12 +45,14 @@ internal sealed class BatchImageEncoder : IBatchImageEncoder
         IModelDownloader downloader,
         IGpuPipelineOptions gpuOptions,
         ILogger<BatchImageEncoder> logger,
-        IOnnxRuntimeOptions onnxRuntimeOptions)
+        IOnnxRuntimeOptions onnxRuntimeOptions,
+        IGpuFallbackNotifier? notifier = null)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
         _gpuOptions = gpuOptions ?? throw new ArgumentNullException(nameof(gpuOptions));
+        _gpuFallback = notifier;
     }
 
     private Task EnsureInitializedAsync()
@@ -74,24 +77,10 @@ internal sealed class BatchImageEncoder : IBatchImageEncoder
     {
         _session?.Dispose();
 
-        var sessionOptions = new SessionOptions
-        {
-            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
-        };
-
-        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
-
-        try
-        {
-            sessionOptions.AppendExecutionProvider_CUDA();
-            _logger.LogInformation("BatchImageEncoder: using CUDA GPU");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning($"BatchImageEncoder: CUDA unavailable, falling back to CPU {ex.Message}");
-        }
-
-        _session = new InferenceSession(modelPath, sessionOptions);
+        // CUDA EP first; any CUDA failure (missing CUDA/cuDNN libraries) falls back to a
+        // CPU-only session and reports via the notifier so the UI can offer the path dialog.
+        _session = OnnxSessionFactory.CreateWithCudaFallback(
+            modelPath, _onnxRuntimeOptions.ThreadCount, _logger, nameof(BatchImageEncoder), _gpuFallback);
 
         var inputMeta = _session.InputMetadata.First();
         var dims = inputMeta.Value.Dimensions;

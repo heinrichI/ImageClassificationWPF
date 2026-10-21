@@ -113,6 +113,23 @@ public interface IUserSettingsStore
 
     /// <summary>Persists the image-search recursion option (keeps the other values untouched).</summary>
     void SaveImageSearchRecurseSubfolders(bool value);
+
+    /// <summary>
+    /// CUDA bin directory (the folder with <c>cudart64_*.dll</c>) prepended to the process
+    /// PATH at startup so the ONNX Runtime CUDA execution provider can find CUDA.
+    /// Empty = not configured (auto-detected on first launch when possible).
+    /// Applies after an app restart (native ONNX Runtime DLLs are already loaded by then).
+    /// </summary>
+    string CudaPath { get; }
+
+    /// <summary>
+    /// cuDNN bin directory (the folder with <c>cudnn*.dll</c>) prepended to the process
+    /// PATH at startup, same semantics as <see cref="CudaPath"/>.
+    /// </summary>
+    string CudnnPath { get; }
+
+    /// <summary>Persists the CUDA/cuDNN bin directories (keeps the other values untouched).</summary>
+    void SaveGpuPaths(string? cudaPath, string? cudnnPath);
 }
 
 internal sealed class UserSettingsStore : IUserSettingsStore, IDisposable
@@ -140,6 +157,8 @@ internal sealed class UserSettingsStore : IUserSettingsStore, IDisposable
     private volatile IReadOnlyList<string> _imageSearchPhraseHistory = Array.Empty<string>();
     private double _imageSearchSimilarityThreshold = 0.25; // lock-guarded
     private volatile bool _imageSearchRecurseSubfolders = true;
+    private volatile string _cudaPath = string.Empty;
+    private volatile string _cudnnPath = string.Empty;
 
     public int OnnxThreadCount => _onnxThreadCount;
     public int GpuBatchSize => _gpuBatchSize;
@@ -155,6 +174,8 @@ internal sealed class UserSettingsStore : IUserSettingsStore, IDisposable
     public IReadOnlyList<string> ImageSearchPhraseHistory => _imageSearchPhraseHistory;
     public double ImageSearchSimilarityThreshold => _imageSearchSimilarityThreshold;
     public bool ImageSearchRecurseSubfolders => _imageSearchRecurseSubfolders;
+    public string CudaPath => _cudaPath;
+    public string CudnnPath => _cudnnPath;
 
     public UserSettingsStore(ILogger<UserSettingsStore> logger)
     {
@@ -266,6 +287,17 @@ internal sealed class UserSettingsStore : IUserSettingsStore, IDisposable
         Persist();
     }
 
+    public void SaveGpuPaths(string? cudaPath, string? cudnnPath)
+    {
+        lock (_lock)
+        {
+            _cudaPath = cudaPath?.Trim() ?? string.Empty;
+            _cudnnPath = cudnnPath?.Trim() ?? string.Empty;
+        }
+
+        Persist();
+    }
+
     /// <summary>Writes every current in-memory value to the settings file (fail-soft).</summary>
     private void Persist()
     {
@@ -285,7 +317,9 @@ internal sealed class UserSettingsStore : IUserSettingsStore, IDisposable
                 ImageSearchDirectories = _imageSearchDirectories,
                 ImageSearchPhraseHistory = _imageSearchPhraseHistory,
                 ImageSearchSimilarityThreshold = _imageSearchSimilarityThreshold,
-                ImageSearchRecurseSubfolders = _imageSearchRecurseSubfolders
+                ImageSearchRecurseSubfolders = _imageSearchRecurseSubfolders,
+                CudaPath = _cudaPath,
+                CudnnPath = _cudnnPath
             };
 
             try
@@ -373,6 +407,12 @@ internal sealed class UserSettingsStore : IUserSettingsStore, IDisposable
 
                 if (root.TryGetProperty("ImageSearchRecurseSubfolders", out var irEl))
                     _imageSearchRecurseSubfolders = irEl.ValueKind == JsonValueKind.True;
+
+                if (root.TryGetProperty("CudaPath", out var cpEl) && cpEl.ValueKind == JsonValueKind.String)
+                    _cudaPath = cpEl.GetString() ?? string.Empty;
+
+                if (root.TryGetProperty("CudnnPath", out var dpEl) && dpEl.ValueKind == JsonValueKind.String)
+                    _cudnnPath = dpEl.GetString() ?? string.Empty;
 
                 if (root.TryGetProperty("ImageSearchDirectories", out var idirsEl) && idirsEl.ValueKind == JsonValueKind.Array)
                 {

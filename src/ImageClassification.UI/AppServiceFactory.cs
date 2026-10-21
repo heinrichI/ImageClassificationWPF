@@ -44,6 +44,14 @@ public static class AppServiceFactory
                 services.AddSingleton<IOnnxRuntimeOptions, UserSettingsOnnxBridge>();
                 services.AddSingleton<IGpuPipelineOptions, UserSettingsGpuBridge>();
 
+                // CUDA → CPU fallback reports from the ONNX encoders drive the
+                // "GPU not available" dialog (GpuFallbackWindow). The concrete type is
+                // registered too: App subscribes to its CpuFallbackReported event, which
+                // is not part of the port contract; the factory keeps both keys on the
+                // same singleton instance.
+                services.AddSingleton<Services.GpuFallbackNotifier>();
+                services.AddSingleton<IGpuFallbackNotifier>(sp => sp.GetRequiredService<Services.GpuFallbackNotifier>());
+
                 // Thumbnail infrastructure (background loader + bounded cache)
                 services.AddSingleton<Services.ThumbnailProvider>();
 

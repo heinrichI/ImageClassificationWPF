@@ -97,17 +97,27 @@ public interface IVectorStore : IDisposable
     /// <summary>
     /// Expensive maintenance: fully rebuilds the database file, removing free-space "holes" left
     /// by DELETE / INSERT OR REPLACE. The database is exclusively locked while it runs.
+    /// SQLite cannot report VACUUM progress, so <paramref name="progress"/> only carries
+    /// indeterminate ticks; <paramref name="ct"/> interrupts the statement and SQLite rolls the
+    /// whole rebuild back (the database is never corrupted).
     /// </summary>
-    Task<Core.Models.VectorCacheMaintenanceResult> VacuumAsync();
+    Task<Core.Models.VectorCacheMaintenanceResult> VacuumAsync(
+        IProgress<Core.Models.VectorCacheMaintenanceStatus>? progress = null,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Removes cache entries whose source file no longer exists on disk. Only files on disks
     /// that are currently connected are checked; entries for files on disconnected drives
     /// (removable media, offline shares) are kept, since the files may reappear once the
     /// disk is reconnected. All cached rows of a missing archive (its all-pages row, its
-    /// cover row and any legacy per-page rows) are removed together.
+    /// cover row and any legacy per-page rows) are removed together. Deletion happens only
+    /// after the whole file check, so cancelling (via <paramref name="ct"/>) at any point
+    /// leaves the cache untouched.
     /// </summary>
-    Task<Core.Models.VectorCacheMaintenanceResult> PruneMissingFilesAsync(string? modelName = null);
+    Task<Core.Models.VectorCacheMaintenanceResult> PruneMissingFilesAsync(
+        string? modelName = null,
+        IProgress<Core.Models.VectorCacheMaintenanceStatus>? progress = null,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Ensures the database and schema are initialized (including the one-time migration

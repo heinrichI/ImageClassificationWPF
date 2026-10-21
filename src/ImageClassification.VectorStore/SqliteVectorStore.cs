@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ImageClassification.Core.Interfaces;
@@ -792,32 +793,78 @@ internal sealed class SqliteVectorStore : IVectorStore
         }
     }
 
-    public async Task<VectorCacheMaintenanceResult> VacuumAsync()
+    public async Task<VectorCacheMaintenanceResult> VacuumAsync(
+        IProgress<VectorCacheMaintenanceStatus>? progress = null,
+        CancellationToken ct = default)
     {
         if (_dbPath is null)
             return new VectorCacheMaintenanceResult("vacuum", true, "In-memory store — nothing to do.");
-        await WhenReady;
+        // Hop off the caller's thread: the UI invokes this from the dispatcher, and even
+        // the synchronous preamble (connection setup) must not block the window.
+        // NOTE: Task.Delay(0) is a pre-completed task (zero fast path) and would NOT hop
+        // threads — Task.Run always posts to the thread pool and is the guaranteed hop.
+        await Task.Run(() => { }).ConfigureAwait(false);
+        await WhenReady.ConfigureAwait(false);
 
         var sizeBefore = SafeFileSize(_dbPath);
+        // VACUUM takes an EXCLUSIVE lock and SQLite cannot report its progress. It runs on a
+        // dedicated (non-pooled) connection so the pool stays usable; cancelling the token
+        // interrupts the statement and SQLite rolls the whole rebuild back — the database is
+        // never corrupted either way. Other store operations must be quiesced by the caller
+        // while this runs (the UI shows it in a modal window and blocks searches).
         try
         {
-            var conn = _pool.Rent();
+            using var conn = new SqliteConnection($"Data Source={_dbPath}");
+            await conn.OpenAsync(ct).ConfigureAwait(false);
+
+            using var cmd = new SqliteCommand("VACUUM")
+            {
+                Connection = conn,
+                CommandTimeout = 0 // multi-gigabyte rebuilds outlive any sane statement timeout
+            };
+
+            const string phase = "Rebuilding database file… this can take several minutes; Interrupt rolls the work back";
+            progress?.Report(new VectorCacheMaintenanceStatus(phase, 0, 0, 0, true));
+
+            var work = cmd.ExecuteNonQueryAsync(ct);
+
+            // Indeterminate ticks while the statement runs (VACUUM has no progress hook).
+            _ = Task.Run(async () =>
+                {
+                    while (!work.IsCompleted)
+                    {
+                        try { await Task.Delay(1000, ct).ConfigureAwait(false); }
+                        catch (OperationCanceledException) { return; }
+                        progress?.Report(new VectorCacheMaintenanceStatus(phase, 0, 0, 0, true));
+                    }
+                }, ct);
+
             try
             {
-                using var cmd = new SqliteCommand("VACUUM");
-                cmd.Connection = conn;
-                await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-
+                await work.ConfigureAwait(false);
                 var sizeAfter = SafeFileSize(_dbPath);
                 var detail = $"Database rebuilt: {sizeBefore:N0} → {sizeAfter:N0} bytes " +
                              $"(freed {sizeBefore - sizeAfter:N0} bytes)";
                 _logger?.LogInformation("[VectorStore] Vacuum: {Detail}", detail);
                 return new VectorCacheMaintenanceResult("vacuum", true, detail);
             }
-            finally
+            catch (OperationCanceledException)
             {
-                _pool.Return(conn);
+                var detail = "Interrupted — the rebuild was rolled back, the database is unchanged.";
+                _logger?.LogInformation("[VectorStore] {Detail}", detail);
+                return new VectorCacheMaintenanceResult("vacuum", false, detail);
             }
+            catch (SqliteException ex) when (ex.SqliteErrorCode == 10) // SQLITE_INTERRUPT
+            {
+                var detail = "Interrupted — the rebuild was rolled back, the database is unchanged.";
+                _logger?.LogInformation("[VectorStore] {Detail}", detail);
+                return new VectorCacheMaintenanceResult("vacuum", false, detail);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return new VectorCacheMaintenanceResult("vacuum", false,
+                "Cancelled before start — the database is unchanged.");
         }
         catch (Exception ex)
         {
@@ -827,19 +874,34 @@ internal sealed class SqliteVectorStore : IVectorStore
         }
     }
 
-    public async Task<VectorCacheMaintenanceResult> PruneMissingFilesAsync(string? modelName = null)
+    public async Task<VectorCacheMaintenanceResult> PruneMissingFilesAsync(
+        string? modelName = null,
+        IProgress<VectorCacheMaintenanceStatus>? progress = null,
+        CancellationToken ct = default)
     {
         if (_dbPath is null)
             return new VectorCacheMaintenanceResult("prune", true, "In-memory store — nothing to do.");
-        await WhenReady;
+        // Hop off the caller's thread: the UI invokes this from the dispatcher, and this
+        // body includes synchronous work (pool Rent, MDS "async" calls that run on the
+        // calling thread, disk probes) that must not block the window.
+        // NOTE: Task.Delay(0) is a pre-completed task (zero fast path) and would NOT hop
+        // threads — Task.Run always posts to the thread pool and is the guaranteed hop.
+        await Task.Run(() => { }).ConfigureAwait(false);
+        await WhenReady.ConfigureAwait(false);
 
         try
         {
+            ct.ThrowIfCancellationRequested();
+
+            progress?.Report(new VectorCacheMaintenanceStatus(
+                "Collecting cache entries from the database…", 0, 0, 0, true));
+
             // 1. Collect every distinct file path across the three cache tables
             //    (optionally scoped to one model). Generic-table keys may carry a legacy
             //    "|page=N" suffix — mapped to their base file below.
             var basePathByKey = new Dictionary<string, string>(StringComparer.Ordinal);
             var basePaths = new HashSet<string>(StringComparer.Ordinal);
+            var collectStart = Environment.TickCount;
             {
                 var conn = _pool.Rent();
                 try
@@ -852,7 +914,7 @@ internal sealed class SqliteVectorStore : IVectorStore
                     if (modelName is not null)
                         cmd.Parameters.AddWithValue("@mn", modelName);
 
-                    using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
+                    using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
                     while (await reader.ReadAsync().ConfigureAwait(false))
                     {
                         var key = reader.GetString(0);
@@ -868,7 +930,7 @@ internal sealed class SqliteVectorStore : IVectorStore
                     archives.Connection = conn;
                     if (modelName is not null)
                         archives.Parameters.AddWithValue("@mn", modelName);
-                    using var areader = await archives.ExecuteReaderAsync().ConfigureAwait(false);
+                    using var areader = await archives.ExecuteReaderAsync(ct).ConfigureAwait(false);
                     while (await areader.ReadAsync().ConfigureAwait(false))
                         basePaths.Add(areader.GetString(0));
 
@@ -879,7 +941,7 @@ internal sealed class SqliteVectorStore : IVectorStore
                     covers.Connection = conn;
                     if (modelName is not null)
                         covers.Parameters.AddWithValue("@mn", modelName);
-                    using var cread = await covers.ExecuteReaderAsync().ConfigureAwait(false);
+                    using var cread = await covers.ExecuteReaderAsync(ct).ConfigureAwait(false);
                     while (await cread.ReadAsync().ConfigureAwait(false))
                         basePaths.Add(cread.GetString(0));
                 }
@@ -892,32 +954,182 @@ internal sealed class SqliteVectorStore : IVectorStore
             if (basePaths.Count == 0)
                 return new VectorCacheMaintenanceResult("prune", true, "Cache is empty — nothing to do.");
 
-            // 3. Probe each disk root once per run; only connected roots are trustworthy
-            var rootChecked = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
-            bool RootConnected(string root)
-                => rootChecked.TryGetValue(root, out var cached)
-                    ? cached
-                    : rootChecked[root] = IsRootConnected(root);
+            _logger?.LogInformation(
+                "[VectorStore] Prune: collected {Count} distinct path(s) from the cache in {Ms} ms",
+                basePaths.Count, Environment.TickCount - collectStart);
 
-            // 4. A file counts as missing only if its disk is connected AND the file is gone.
-            //    Files on disconnected (removable / offline) disks are left untouched —
-            //    the file may well reappear once the disk is reconnected.
-            var missingBases = new HashSet<string>(StringComparer.Ordinal);
-            var offlineRoots = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            // 3. Disk-root state is re-validated periodically (not just once per run):
+            //    a disk that drops offline mid-run must stop being probed — a disk
+            //    probe on a dying volume can hang for minutes, and one hung probe must
+            //    not stall the whole check.
+            var rootChecked = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            bool RootConnected(string root) => rootChecked.GetOrAdd(root, _ => IsRootConnected(root));
+
+            // 4. A file counts as missing only if its disk is connected AND the file is
+            //    gone. Files on disconnected (removable / offline) disks are left
+            //    untouched — the file may well reappear once the disk is reconnected.
+            //
+            //    The check runs per DIRECTORY, not per file: paths are grouped by their
+            //    parent directory; a missing directory makes every path in it missing at
+            //    once (no disk probes), an existing one needs a single EnumerateFiles
+            //    instead of one File.Exists per file. On huge prune jobs that is the
+            //    difference between minutes and seconds (O(directories) instead of
+            //    O(files)); per-file File.Exists remains only as a fallback (files on a
+            //    drive root, enumeration errors). Groups run on a few pool threads, so
+            //    one worker stuck on a dying volume cannot freeze the others or the UI,
+            //    and a time-based tick keeps the progress bar moving on slow disks.
+            var groups = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
             foreach (var basePath in basePaths)
             {
-                var root = SafePathRoot(basePath);
-                if (root.Length == 0) continue; // unrooted path — cannot verify, keep the entry
+                var parent = SafeGetDirectoryName(basePath);
+                if (!groups.TryGetValue(parent, out var list))
+                    groups[parent] = list = new List<string>();
+                list.Add(basePath);
+            }
+            var groupList = groups.ToList();
 
-                if (!RootConnected(root))
+            var missingBases = new HashSet<string>(StringComparer.Ordinal);
+            var offlineRoots = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            void CheckGroup(string parent, IReadOnlyList<string> paths)
+            {
+                bool dirExists;
+                try { dirExists = Directory.Exists(parent); }
+                catch { dirExists = false; }
+
+                if (!dirExists)
                 {
-                    offlineRoots.Add(root);
-                    continue;
+                    // The whole directory is gone — every path in it is missing, no probes.
+                    lock (missingBases) missingBases.UnionWith(paths);
+                    return;
                 }
 
-                if (!File.Exists(basePath))
-                    missingBases.Add(basePath);
+                // Files sitting directly on a drive root: enumerating the root is not
+                // worth it — per-file probes instead.
+                if (IsDriveRoot(parent))
+                {
+                    foreach (var p in paths)
+                        if (!File.Exists(p))
+                            lock (missingBases) missingBases.Add(p);
+                    return;
+                }
+
+                try
+                {
+                    // EnumerateFiles returns full paths — compare by file name (NTFS is
+                    // case-insensitive, so cache keys differing in case still match).
+                    var existing = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var name in Directory.EnumerateFiles(parent))
+                        existing.Add(Path.GetFileName(name)!);
+                    foreach (var p in paths)
+                        if (!existing.Contains(Path.GetFileName(p)))
+                            lock (missingBases) missingBases.Add(p);
+                }
+                catch
+                {
+                    // Enumeration failed (e.g. access denied) — per-file fallback.
+                    foreach (var p in paths)
+                        if (!File.Exists(p))
+                            lock (missingBases) missingBases.Add(p);
+                }
             }
+
+            var checkedFiles = 0;
+            int lastReport = Environment.TickCount;
+            int lastLog = Environment.TickCount;
+            int checkStart = Environment.TickCount;
+
+            // Diagnostics (ICS_LOG_FILE): what we are about to check.
+            var topRoots = basePaths
+                .GroupBy(SafePathRoot)
+                .OrderByDescending(g => g.Count())
+                .Take(5)
+                .Select(g => $"{g.Key}={g.Count()}")
+                .ToList();
+            _logger?.LogInformation(
+                "[VectorStore] Prune: {Total} distinct path(s) in {Groups} directory group(s); roots: {Roots}",
+                basePaths.Count, groupList.Count, string.Join(", ", topRoots));
+
+            var workerCount = Math.Max(1, Math.Min(4, Environment.ProcessorCount));
+            var chunk = Math.Max(1, (groupList.Count + workerCount - 1) / workerCount);
+            var workers = new List<Task>();
+            for (var w = 0; w < workerCount; w++)
+            {
+                var start = w * chunk;
+                if (start >= groupList.Count) break;
+                var end = Math.Min(groupList.Count, start + chunk);
+
+                workers.Add(Task.Run(() =>
+                {
+                    for (var g = start; g < end; g++)
+                    {
+                        var parent = groupList[g].Key;
+                        var paths = groupList[g].Value;
+                        ct.ThrowIfCancellationRequested();
+
+                        // Periodically (every 64 groups) re-validate all root states: a
+                        // disk that dropped offline since the last validation is skipped
+                        // from here on (its entries are kept).
+                        if (g > 0 && g % 64 == 0)
+                            rootChecked.Clear();
+
+                        var root = SafePathRoot(parent);
+                        if (root.Length == 0)
+                        {
+                            // Unrooted path — cannot verify, keep the entry.
+                            Interlocked.Add(ref checkedFiles, paths.Count);
+                            continue;
+                        }
+
+                        if (!RootConnected(root))
+                        {
+                            lock (offlineRoots) offlineRoots.Add(root);
+                            Interlocked.Add(ref checkedFiles, paths.Count);
+                            continue;
+                        }
+
+                        // Time the probe: a group that takes > 10 s is a struggling
+                        // volume and is worth a log line (ICS_LOG_FILE).
+                        var probeStart = Environment.TickCount;
+                        CheckGroup(parent, paths);
+                        Interlocked.Add(ref checkedFiles, paths.Count);
+                        var probeMs = Environment.TickCount - probeStart;
+                        if (probeMs > 10_000)
+                            _logger?.LogWarning(
+                                "[VectorStore] Prune: slow group {Group} ({Count} file(s)) took {Ms} ms",
+                                parent, paths.Count, probeMs);
+
+                        // UI liveness: tick on file milestones OR whenever 500 ms passed
+                        // since the last report (slow / struggling volumes).
+                        var now = Environment.TickCount;
+                        if (now - Interlocked.Exchange(ref lastReport, now) >= 500
+                            || (checkedFiles & 0xFF) == 0)
+                        {
+                            int missingNow;
+                            lock (missingBases) { missingNow = missingBases.Count; }
+                            progress?.Report(new VectorCacheMaintenanceStatus(
+                                "Checking files on disk…", checkedFiles, basePaths.Count,
+                                missingNow, false));
+
+                            // Diagnostics (ICS_LOG_FILE): progress line every ~5 s.
+                            if (now - Interlocked.Exchange(ref lastLog, now) >= 5000)
+                                _logger?.LogInformation(
+                                    "[VectorStore] Prune progress: {Checked}/{Total} file(s) ({Pct}%), missing {Missing}, group {Group}",
+                                    checkedFiles, basePaths.Count,
+                                    basePaths.Count == 0 ? 0 : checkedFiles * 100 / basePaths.Count,
+                                    missingNow, parent);
+                        }
+                    }
+                }, ct));
+            }
+            await Task.WhenAll(workers).ConfigureAwait(false);
+
+            _logger?.LogInformation(
+                "[VectorStore] Prune: file check finished in {Ms} ms — {Missing} missing of {Total}",
+                Environment.TickCount - checkStart, missingBases.Count, basePaths.Count);
+
+            progress?.Report(new VectorCacheMaintenanceStatus(
+                "Checking files on disk…", checkedFiles, basePaths.Count, missingBases.Count, false));
 
             var missingKeys = basePathByKey.Where(kv => missingBases.Contains(kv.Value)).Select(kv => kv.Key).ToList();
 
@@ -926,63 +1138,69 @@ internal sealed class SqliteVectorStore : IVectorStore
             int removedGeneric = 0, removedArchives = 0, removedCovers = 0;
             if (missingKeys.Count > 0 || missingBases.Count > 0)
             {
+                progress?.Report(new VectorCacheMaintenanceStatus(
+                    "Removing entries from the database…", 0, 0, missingBases.Count, true));
                 var conn = _pool.Rent();
                 try
                 {
                     using var tx = conn.BeginTransaction();
-                    const int chunkSize = 500;
+                    var deleteStart = Environment.TickCount;
+
+                    // Stage-based progress: the bulk delete has no per-row progress.
+                    var stages = 1 + (missingKeys.Count > 0 ? 1 : 0) + (missingBases.Count > 0 ? 2 : 0);
+                    var stage = 0;
+                    void TickStage(string phase)
+                    {
+                        stage++;
+                        progress?.Report(new VectorCacheMaintenanceStatus(
+                            phase, stage, stages, missingBases.Count, false));
+                    }
+
+                    // BULK delete: the missing keys/bases are loaded into per-connection
+                    // temp tables and each cache table is deleted by ONE statement driven
+                    // by a throwaway index on the path column. The primary key is
+                    // (model_name, path), so a path-only chunked IN(...) list full-scans
+                    // the table once per chunk — hundreds of scans on a multi-GB cache.
+                    // Everything below is in one transaction: any failure or cancellation
+                    // rolls back the deletes, temp tables and throwaway indexes together.
                     if (missingKeys.Count > 0)
                     {
-                        for (var i = 0; i < missingKeys.Count; i += chunkSize)
-                        {
-                            var part = missingKeys.Skip(i).Take(chunkSize).ToList();
-                            using var cmd = new SqliteCommand();
-                            cmd.Connection = conn;
-                            cmd.Transaction = tx;
-                            for (var j = 0; j < part.Count; j++)
-                                cmd.Parameters.AddWithValue($"@k{j}", part[j]);
-                            cmd.CommandText =
-                                $"DELETE FROM embeddings WHERE file_path IN ({string.Join(",", part.Select((_, j) => $"@k{j}"))})" +
-                                (modelName is null ? string.Empty : " AND model_name = @mn");
-                            if (modelName is not null)
-                                cmd.Parameters.AddWithValue("@mn", modelName);
-                            removedGeneric += await cmd.ExecuteNonQueryAsync().ConfigureAwait(false);
-                        }
+                        using (var mk = new SqliteCommand(
+                            "CREATE TEMP TABLE prune_missing_generic (key TEXT PRIMARY KEY)", conn, tx))
+                            await mk.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        await FillTempTableAsync(conn, tx, "prune_missing_generic", "key", missingKeys, ct).ConfigureAwait(false);
                     }
-
-                    var bases = missingBases.ToList();
-                    for (var i = 0; i < bases.Count; i += chunkSize)
+                    if (missingBases.Count > 0)
                     {
-                        var part = bases.Skip(i).Take(chunkSize).ToList();
-                        var pars = string.Join(",", part.Select((_, j) => $"@b{j}"));
-
-                        using (var archives = new SqliteCommand(
-                            $"DELETE FROM archive_embeddings WHERE archive_path IN ({pars})" +
-                            (modelName is null ? string.Empty : " AND model_name = @mn")))
-                        {
-                            archives.Connection = conn;
-                            archives.Transaction = tx;
-                            for (var j = 0; j < part.Count; j++)
-                                archives.Parameters.AddWithValue($"@b{j}", part[j]);
-                            if (modelName is not null)
-                                archives.Parameters.AddWithValue("@mn", modelName);
-                            removedArchives += await archives.ExecuteNonQueryAsync().ConfigureAwait(false);
-                        }
-
-                        using (var covers = new SqliteCommand(
-                            $"DELETE FROM cover_embeddings WHERE archive_path IN ({pars})" +
-                            (modelName is null ? string.Empty : " AND model_name = @mn")))
-                        {
-                            covers.Connection = conn;
-                            covers.Transaction = tx;
-                            for (var j = 0; j < part.Count; j++)
-                                covers.Parameters.AddWithValue($"@b{j}", part[j]);
-                            if (modelName is not null)
-                                covers.Parameters.AddWithValue("@mn", modelName);
-                            removedCovers += await covers.ExecuteNonQueryAsync().ConfigureAwait(false);
-                        }
+                        using (var mb = new SqliteCommand(
+                            "CREATE TEMP TABLE prune_missing_base (path TEXT PRIMARY KEY)", conn, tx))
+                            await mb.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+                        await FillTempTableAsync(conn, tx, "prune_missing_base", "path", missingBases.ToList(), ct).ConfigureAwait(false);
                     }
+                    TickStage("Bulk delete prepared…");
+
+                    if (missingKeys.Count > 0)
+                    {
+                        removedGeneric = await DeleteViaThrowawayIndexAsync(
+                            conn, tx, "embeddings", "file_path", "prune_missing_generic", "key", modelName, ct)
+                            .ConfigureAwait(false);
+                        TickStage("Removed generic embeddings…");
+                    }
+                    if (missingBases.Count > 0)
+                    {
+                        removedArchives = await DeleteViaThrowawayIndexAsync(
+                            conn, tx, "archive_embeddings", "archive_path", "prune_missing_base", "path", modelName, ct)
+                            .ConfigureAwait(false);
+                        removedCovers = await DeleteViaThrowawayIndexAsync(
+                            conn, tx, "cover_embeddings", "archive_path", "prune_missing_base", "path", modelName, ct)
+                            .ConfigureAwait(false);
+                        TickStage("Removed archive and cover embeddings…");
+                    }
+
                     tx.Commit();
+                    _logger?.LogInformation(
+                        "[VectorStore] Prune: bulk delete finished in {Ms} ms — embeddings {E}, archives {A}, covers {C}",
+                        Environment.TickCount - deleteStart, removedGeneric, removedArchives, removedCovers);
                 }
                 finally
                 {
@@ -999,6 +1217,14 @@ internal sealed class SqliteVectorStore : IVectorStore
                          $"for {missingBases.Count} missing file(s)" + offline;
             _logger?.LogInformation("[VectorStore] Prune: {Detail}", detail);
             return new VectorCacheMaintenanceResult("prune", true, detail);
+        }
+        catch (OperationCanceledException)
+        {
+            // Deletion happens only after the whole file check, in one transaction —
+            // a cancellation at any point leaves the cache exactly as it was.
+            var detail = "Cancelled — no changes were made.";
+            _logger?.LogInformation("[VectorStore] Prune: {Detail}", detail);
+            return new VectorCacheMaintenanceResult("prune", false, detail);
         }
         catch (Exception ex)
         {
@@ -1067,6 +1293,72 @@ internal sealed class SqliteVectorStore : IVectorStore
     {
         try { return Path.GetPathRoot(path) ?? string.Empty; }
         catch { return string.Empty; }
+    }
+
+    private static string SafeGetDirectoryName(string path)
+    {
+        try { return Path.GetDirectoryName(path) ?? string.Empty; }
+        catch { return string.Empty; }
+    }
+
+    /// <summary>True for a drive-root directory ("C:\" / "C:").</summary>
+    private static bool IsDriveRoot(string dir)
+    {
+        return dir.Length is 2 or 3 && dir[1] == ':';
+    }
+
+    /// <summary>
+    /// Loads the given values into a temp table in multi-row chunks (at most 2,000 rows
+    /// per statement — far below the SQLite parameter limit). The temp table must already
+    /// exist on the connection; table/column are internal identifiers, not user input.
+    /// </summary>
+    private static async Task FillTempTableAsync(
+        SqliteConnection conn, SqliteTransaction tx, string table, string column,
+        IReadOnlyList<string> values, CancellationToken ct)
+    {
+        const int chunkSize = 2000;
+        for (var i = 0; i < values.Count; i += chunkSize)
+        {
+            ct.ThrowIfCancellationRequested();
+            var part = values.Skip(i).Take(chunkSize).ToList();
+            using var cmd = new SqliteCommand(
+                $"INSERT INTO {table} ({column}) VALUES (" +
+                string.Join("),(", part.Select((_, j) => $"@v{j}")) + ")", conn, tx);
+            for (var j = 0; j < part.Count; j++)
+                cmd.Parameters.AddWithValue($"@v{j}", part[j]);
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Deletes the rows of <paramref name="table"/> whose <paramref name="pathColumn"/>
+    /// appears in the given temp table, driven by a throwaway index on the path column
+    /// (so the delete is index-driven instead of a full table scan). The index is dropped
+    /// before returning. Everything runs in the caller's transaction, so a failure or
+    /// cancellation rolls the index back as well.
+    /// </summary>
+    private static async Task<int> DeleteViaThrowawayIndexAsync(
+        SqliteConnection conn, SqliteTransaction tx, string table, string pathColumn,
+        string tempTable, string tempColumn, string? modelName, CancellationToken ct)
+    {
+        var indexName = $"idx_prune_{table}_{pathColumn}";
+        using (var create = new SqliteCommand($"CREATE INDEX {indexName} ON {table} ({pathColumn})", conn, tx))
+            await create.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        int removed;
+        using (var del = new SqliteCommand(
+            $"DELETE FROM {table} WHERE {pathColumn} IN (SELECT {tempColumn} FROM {tempTable})" +
+            (modelName is null ? string.Empty : " AND model_name = @mn"), conn, tx))
+        {
+            if (modelName is not null)
+                del.Parameters.AddWithValue("@mn", modelName);
+            removed = await del.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        using (var drop = new SqliteCommand($"DROP INDEX {indexName}", conn, tx))
+            await drop.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+
+        return removed;
     }
 
     public void Dispose()

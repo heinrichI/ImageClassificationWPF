@@ -19,17 +19,19 @@ internal sealed class ClipImageEncoder : IClipImageEncoder
     private readonly IModelDownloader _downloader;
     private readonly ILogger<BatchImageEncoder> _logger;
     private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
+    private readonly IGpuFallbackNotifier? _gpuFallback;
     private InferenceSession? _session;
     private int _imageSize = 224;
     private bool _initialized;
     private Task? _initTask;
     private readonly object _initLock = new();
 
-    public ClipImageEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger, IOnnxRuntimeOptions onnxRuntimeOptions)
+    public ClipImageEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger, IOnnxRuntimeOptions onnxRuntimeOptions, IGpuFallbackNotifier? notifier = null)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
         _logger = logger;
         _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
+        _gpuFallback = notifier;
     }
 
     private Task EnsureInitializedAsync()
@@ -54,24 +56,10 @@ internal sealed class ClipImageEncoder : IClipImageEncoder
     {
         _session?.Dispose();
 
-        var sessionOptions = new SessionOptions
-        {
-            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
-        };
-
-        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
-
-        try
-        {
-            sessionOptions.AppendExecutionProvider_CUDA();
-        }
-        catch (Exception ex)
-        {
-            // CUDA not available — fall back to CPU
-            _logger.LogWarning($"ClipImageEncoder: CUDA unavailable, falling back to CPU {ex.Message}");
-        }
-
-        _session = new InferenceSession(modelPath, sessionOptions);
+        // CUDA EP first; any CUDA failure (missing CUDA/cuDNN libraries) falls back to a
+        // CPU-only session and reports via the notifier so the UI can offer the path dialog.
+        _session = OnnxSessionFactory.CreateWithCudaFallback(
+            modelPath, _onnxRuntimeOptions.ThreadCount, _logger, nameof(ClipImageEncoder), _gpuFallback);
 
         var inputMeta = _session.InputMetadata.First();
         var dims = inputMeta.Value.Dimensions;

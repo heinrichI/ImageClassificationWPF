@@ -254,7 +254,10 @@ public class ImageSearchServiceTests : IDisposable
 
         Assert.Equal(2, results.Count);
         Assert.DoesNotContain(results, r => r.FileName == "b.png");
-        Assert.Contains(status.Items, s => s.Note is not null && s.Note.Contains("b.png"));
+        // The note must carry the FULL path — a bare file name is ambiguous in
+        // recursive / multi-directory searches.
+        Assert.Contains(status.Items, s =>
+            s.Note is not null && s.Note.Contains(Path.Combine(_tempDir, "b.png")));
         Assert.Equal(2, _savedCount); // only a.jpg and c.tiff were cached
     }
 

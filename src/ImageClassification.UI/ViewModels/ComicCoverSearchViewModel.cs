@@ -812,32 +812,31 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     }
 
     [RelayCommand]
-    private async Task VectorCacheVacuumAsync()
+    private void VectorCacheVacuum()
     {
-        var confirm = MessageBox.Show(
-            "Vacuum rebuilds the database file from scratch and locks the store for the whole " +
-            "operation (can take a while for large caches). Continue?",
-            "Vector Cache — Vacuum", MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (confirm != MessageBoxResult.Yes) return;
-
-        var result = await _vectorStore.VacuumAsync();
-        MessageBox.Show(result.Detail, "Vector Cache — Vacuum", MessageBoxButton.OK,
-            result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+        var window = new VectorCacheMaintenanceWindow(
+            "Vector cache — Vacuum",
+            "Rebuilds the database file from scratch, removing free-space holes left by prunes and updates.\n\n" +
+            "The cache is locked while it runs: searches are unavailable until the operation finishes. " +
+            "On a multi-gigabyte database this can take several minutes.\n\n" +
+            "Interrupt stops the operation and rolls it back — the database is never corrupted.",
+            (ct, progress) => _vectorStore.VacuumAsync(progress, ct));
+        window.ShowDialog();
     }
 
     [RelayCommand]
-    private async Task VectorCachePruneMissingFilesAsync()
+    private void VectorCachePruneMissingFiles()
     {
-        var confirm = MessageBox.Show(
-            "Remove cache entries for files that no longer exist on disk?\n\n" +
+        var window = new VectorCacheMaintenanceWindow(
+            "Vector cache — Prune missing files",
+            "Removes cache entries for files that no longer exist on disk.\n\n" +
             "Only disks that are currently connected are checked. Files on disconnected " +
-            "drives (removable media, offline shares) are left in the cache.",
-            "Vector Cache — Prune missing files", MessageBoxButton.YesNo, MessageBoxImage.Question);
-        if (confirm != MessageBoxResult.Yes) return;
-
-        var result = await _vectorStore.PruneMissingFilesAsync();
-        MessageBox.Show(result.Detail, "Vector Cache — Prune missing files", MessageBoxButton.OK,
-            result.Success ? MessageBoxImage.Information : MessageBoxImage.Warning);
+            "drives (removable media, offline shares) are kept in the cache, since they " +
+            "may reappear once the disk is reconnected.\n\n" +
+            "Scanning a large cache can take a while — the window shows progress and a " +
+            "Cancel button; cancelling at any point leaves the cache untouched.",
+            (ct, progress) => _vectorStore.PruneMissingFilesAsync(null, progress, ct));
+        window.ShowDialog();
     }
 
     partial void OnIsBusyChanged(bool value)

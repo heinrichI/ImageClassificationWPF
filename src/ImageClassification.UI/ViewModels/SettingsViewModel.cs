@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -5,6 +6,7 @@ using CommunityToolkit.Mvvm.Input;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
 using ImageClassification.UI.Configuration;
+using ImageClassification.UI.Services;
 
 namespace ImageClassification.UI.ViewModels;
 
@@ -33,6 +35,10 @@ public partial class SettingsViewModel : ObservableObject
         _maxCachedThumbnails = _lastMaxCached = store.MaxCachedThumbnails;
         _maxPreviews = _lastMaxPreviews = store.MaxPreviews;
 
+        _cudaPath = store.CudaPath;
+        _cudnnPath = store.CudnnPath;
+        RefreshGpuStatus();
+
         RefreshModels();
     }
 
@@ -57,6 +63,20 @@ public partial class SettingsViewModel : ObservableObject
     /// 0 = no limit. Applied from the next search.
     /// </summary>
     [ObservableProperty] private int _maxPreviews;
+
+    /// <summary>
+    /// CUDA bin directory (folder with <c>cudart64_*.dll</c>) prepended to the process
+    /// PATH at startup. Empty = auto-detected on the first launch. Applied after restart.
+    /// </summary>
+    [ObservableProperty] private string _cudaPath;
+
+    /// <summary>
+    /// cuDNN bin directory (folder with <c>cudnn*.dll</c>), same semantics as <see cref="CudaPath"/>.
+    /// </summary>
+    [ObservableProperty] private string _cudnnPath;
+
+    /// <summary>Current state of the GPU paths (found / not found / not set).</summary>
+    [ObservableProperty] private string _gpuStatusText;
 
     public ObservableCollection<ModelDownloadInfo> AvailableModels { get; } = new();
 
@@ -128,6 +148,79 @@ public partial class SettingsViewModel : ObservableObject
         {
             AvailableModels.Add(model);
         }
+    }
+
+    /// <summary>Picks a folder for the CUDA bin field.</summary>
+    [RelayCommand]
+    private void BrowseCudaPath()
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Select the CUDA bin directory (folder with cudart64_*.dll)"
+        };
+        if (dialog.ShowDialog() == true)
+        {
+            CudaPath = dialog.FolderName;
+            RefreshGpuStatus();
+        }
+    }
+
+    /// <summary>Picks a folder for the cuDNN bin field.</summary>
+    [RelayCommand]
+    private void BrowseCudnnPath()
+    {
+        var dialog = new Microsoft.Win32.OpenFolderDialog
+        {
+            Title = "Select the cuDNN bin directory (folder with cudnn*.dll)"
+        };
+        if (dialog.ShowDialog() == true)
+        {
+            CudnnPath = dialog.FolderName;
+            RefreshGpuStatus();
+        }
+    }
+
+    /// <summary>
+    /// Auto-detects the still-empty paths (registry / Program Files synchronously-safe
+    /// part, then the deep per-drive cuDNN scan in the background), fills the fields,
+    /// saves to user-settings.json and refreshes the status. Manually set fields are
+    /// never overwritten.
+    /// </summary>
+    [RelayCommand]
+    private async Task DetectGpuPathsAsync()
+    {
+        GpuStatusText = "Detecting CUDA/cuDNN…";
+
+        var detectCuda = string.IsNullOrWhiteSpace(CudaPath);
+        var detectCudnn = string.IsNullOrWhiteSpace(CudnnPath);
+
+        if (detectCuda)
+            CudaPath = await Task.Run(() => GpuLibraryDetector.DetectCudaPath()) ?? string.Empty;
+        if (detectCudnn)
+            CudnnPath = await Task.Run(() => GpuLibraryDetector.DetectCudnnPathFull()) ?? string.Empty;
+
+        _store.SaveGpuPaths(CudaPath, CudnnPath);
+        RefreshGpuStatus(saved: true);
+    }
+
+    private void RefreshGpuStatus(bool saved = false)
+    {
+        var lines = new List<string>();
+        if (saved)
+            lines.Add("Saved to user-settings.json.");
+        lines.Add(DescribeGpuPath("CUDA", CudaPath, GpuLibraryDetector.HasCudart));
+        lines.Add(DescribeGpuPath("cuDNN", CudnnPath, GpuLibraryDetector.ContainsCudnn));
+        lines.Add("The paths take effect after the app is restarted.");
+        GpuStatusText = string.Join(Environment.NewLine, lines);
+    }
+
+    private static string DescribeGpuPath(string label, string path, Func<string, bool> marker)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return $"{label}: (not set — use Detect & Save or Browse)";
+        return marker(path)
+            ? $"{label}: {path}"
+            : $"{label}: {path} — folder not found or missing the marker DLLs";
     }
 
     [RelayCommand]

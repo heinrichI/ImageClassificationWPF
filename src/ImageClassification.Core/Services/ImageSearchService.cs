@@ -224,7 +224,7 @@ internal sealed class ImageSearchService : IImageSearchService
                         skipped++;
                         _logger.LogWarning("Image search: could not read or decode {Path}", item.Path);
                         status?.Report(new ImageSearchStatus
-                            { Note = $"Skipped {Path.GetFileName(item.Path)}: could not be read or decoded" });
+                            { Note = $"Skipped {item.Path}: could not be read or decoded" });
                         continue;
                     }
 

@@ -93,6 +93,17 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
 - Results ranked by cosine similarity (raw CLIP score)
 - Adjustable similarity threshold (default 0.25)
 - Score distribution shown in status bar
+- The in-tab "DB" menu maintains the vector cache: **Info** (sizes, entry counts, age),
+  **Optimize** (fold the WAL into the database), **Vacuum** (rebuild the file, reclaim
+  free space) and **Prune missing files** (remove entries for files that no longer
+  exist on disk; files on disconnected drives are kept). Prune checks paths grouped by
+  parent directory in parallel — a deleted directory makes all its paths missing at once,
+  so even hundreds of thousands of entries are pruned in seconds; the removal itself is
+  one bulk delete driven by a temp table of the missing paths (no per-chunk table
+  re-scan), and every phase runs on background threads — the window and its Cancel
+  button stay responsive throughout, with progress ticks at least every 500 ms. Vacuum and Prune run in a modal window
+  with a progress bar and a Cancel/Interrupt button — cancelling (prune) or interrupting
+  (vacuum) aborts the operation and leaves the database exactly as it was
 
 ### Search Image (Tab 7)
 - Search plain image files (JPG/JPEG/PNG/BMP/TIFF/WebP) by semantic description
@@ -113,6 +124,8 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
   default viewer, right click → copy path; files that fail to decode are skipped
   and listed in the status line
 - "Copy results images…" (tab menu) copies all result files into a chosen folder
+- Same "DB" menu as Comic Search (Info / Optimize / Vacuum / Prune missing files),
+  with a modal progress + Cancel/Interrupt window for the long operations
 - Cancel takes effect between GPU batches; everything encoded so far is already scored
   into the results AND already saved to the per-file cache (chunk-by-chunk, exactly
   like Comic Search), so a cancelled run still warms the cache — the next search
@@ -120,8 +133,14 @@ dotnet test --filter "FullyQualifiedName~IntegrationTest"
 
 ### Settings (Tab 5)
 - ONNX Runtime thread count
-- Light/Dark theme
-- GPU acceleration (CUDA)
+- GPU batch size (images per ONNX inference batch)
+- Thumbnail width / cache size, max result previews
+- **GPU (CUDA / cuDNN)**: bin directories of CUDA and cuDNN, prepended to the process
+  PATH at startup so the ONNX Runtime CUDA execution provider can find them. Empty
+  values are auto-detected on the first launch (NVIDIA registry / typical install
+  locations / shallow drive scan); "Detect & Save" and Browse let you override. Changes
+  apply after a restart; if CUDA is configured but ONNX Runtime still can't load it,
+  a "GPU not available" dialog offers the same path selection
 - Built-in model downloader with progress bar
 
 ## Model Setup

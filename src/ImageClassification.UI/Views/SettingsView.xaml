@@ -33,6 +33,37 @@
             <TextBlock Foreground="Gray" FontSize="11" Margin="0,0,0,20" MaxWidth="460" TextWrapping="Wrap"
                 Text="All search results are listed in the grid (it is virtualized, so even thousands of entries scroll smoothly). Only the top N results get a real preview; the rest show placeholders — decoding thousands of page images keeps the app sluggish. Lower = less background work after very large searches. 0 = load a preview for every result. Applied from the next search."/>
 
+            <!-- GPU (CUDA / cuDNN) -->
+            <TextBlock Text="GPU (CUDA / cuDNN)" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8"/>
+            <TextBlock Foreground="Gray" FontSize="11" Margin="0,0,0,8" MaxWidth="460" TextWrapping="Wrap"
+                Text="Bin directories of CUDA (cudart64_*.dll) and cuDNN (cudnn*.dll), prepended to the process PATH at startup so the ONNX Runtime CUDA execution provider can find them. Empty values are auto-detected on the first launch (NVIDIA registry / typical install locations). Changes apply after the app is restarted."/>
+            <Grid MaxWidth="560">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="90"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition/>
+                    <RowDefinition/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="CUDA bin" VerticalAlignment="Center" Foreground="Gray"/>
+                <TextBox  Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalContentAlignment="Center"
+                          Text="{Binding CudaPath, UpdateSourceTrigger=PropertyChanged}"/>
+                <Button  Grid.Row="0" Grid.Column="2" Content="Browse…" Margin="4,4,0,4" Padding="10,3"
+                          Command="{Binding BrowseCudaPathCommand}"/>
+
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="cuDNN bin" VerticalAlignment="Center" Foreground="Gray"/>
+                <TextBox  Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalContentAlignment="Center"
+                          Text="{Binding CudnnPath, UpdateSourceTrigger=PropertyChanged}"/>
+                <Button  Grid.Row="1" Grid.Column="2" Content="Browse…" Margin="4,4,0,4" Padding="10,3"
+                          Command="{Binding BrowseCudnnPathCommand}"/>
+            </Grid>
+            <TextBlock Text="{Binding GpuStatusText}" TextWrapping="Wrap" Foreground="Gray" FontSize="11" Margin="0,4,0,8"/>
+            <Button Content="Detect &amp; Save" Command="{Binding DetectGpuPathsCommand}" Padding="12,4"
+                    HorizontalAlignment="Left" Margin="0,0,0,12"/>
+
             <!-- Model Downloads -->
             <TextBlock Text="Download Models" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,8"/>
             <TextBlock Text="Download pre-trained ONNX models for classification and tagging."

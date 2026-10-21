@@ -17,17 +17,19 @@ internal sealed class ClipTextEncoder : IClipTextEncoder
     private readonly IModelDownloader _downloader;
     private readonly ILogger<BatchImageEncoder> _logger;
     private readonly IOnnxRuntimeOptions _onnxRuntimeOptions;
+    private readonly IGpuFallbackNotifier? _gpuFallback;
     private ClipBpeTokenizer? _tokenizer;
     private InferenceSession? _session;
     private bool _initialized;
     private Task? _initTask;
     private readonly object _initLock = new();
 
-    public ClipTextEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger, IOnnxRuntimeOptions onnxRuntimeOptions)
+    public ClipTextEncoder(IModelDownloader downloader, ILogger<BatchImageEncoder> logger, IOnnxRuntimeOptions onnxRuntimeOptions, IGpuFallbackNotifier? notifier = null)
     {
         _downloader = downloader ?? throw new ArgumentNullException(nameof(downloader));
         _logger = logger;
         _onnxRuntimeOptions = onnxRuntimeOptions ?? throw new ArgumentNullException(nameof(onnxRuntimeOptions));
+        _gpuFallback = notifier;
     }
 
     private Task EnsureInitializedAsync()
@@ -55,24 +57,10 @@ internal sealed class ClipTextEncoder : IClipTextEncoder
     {
         _session?.Dispose();
 
-        var sessionOptions = new SessionOptions
-        {
-            GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL
-        };
-
-        OnnxSessionOptionsHelper.ApplyThreads(sessionOptions, _onnxRuntimeOptions.ThreadCount);
-
-        try
-        {
-            sessionOptions.AppendExecutionProvider_CUDA();
-        }
-        catch(Exception ex)
-        {
-            // CUDA not available — fall back to CPU
-            _logger.LogWarning($"ClipTextEncoder: CUDA unavailable, falling back to CPU {ex.Message}");
-        }
-
-        _session = new InferenceSession(modelPath, sessionOptions);
+        // CUDA EP first; any CUDA failure (missing CUDA/cuDNN libraries) falls back to a
+        // CPU-only session and reports via the notifier so the UI can offer the path dialog.
+        _session = OnnxSessionFactory.CreateWithCudaFallback(
+            modelPath, _onnxRuntimeOptions.ThreadCount, _logger, nameof(ClipTextEncoder), _gpuFallback);
         await Task.CompletedTask;
     }
 
