@@ -247,7 +247,24 @@
                                      BorderThickness="0">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
-                                        <TextBlock Text="{Binding}" Foreground="OrangeRed" TextWrapping="Wrap" />
+                                        <!-- Per-entry context menu (Copy path / Open in Explorer): Tag carries the
+                                             view model, reached from the ContextMenu via PlacementTarget — the same
+                                             pattern the results tiles use for their "Copy path" menu. -->
+                                        <TextBlock Text="{Binding Text}"
+                                                   Foreground="OrangeRed"
+                                                   TextWrapping="Wrap"
+                                                   Tag="{Binding DataContext, RelativeSource={RelativeSource AncestorType=ListBox}}">
+                                            <TextBlock.ContextMenu>
+                                                <ContextMenu>
+                                                    <MenuItem Header="Copy path"
+                                                              Command="{Binding PlacementTarget.Tag.CopyNotePathCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding Path}" />
+                                                    <MenuItem Header="Open in Explorer"
+                                                              Command="{Binding PlacementTarget.Tag.OpenNoteInExplorerCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                              CommandParameter="{Binding}" />
+                                                </ContextMenu>
+                                            </TextBlock.ContextMenu>
+                                        </TextBlock>
                                     </DataTemplate>
                                 </ListBox.ItemTemplate>
                             </ListBox>

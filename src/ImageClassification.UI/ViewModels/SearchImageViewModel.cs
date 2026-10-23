@@ -279,7 +279,7 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
     /// accumulated in a visible UI list; cleared on search start. Capped so a pathological
     /// directory cannot grow it unboundedly.
     /// </summary>
-    public ObservableCollection<string> FileNotes { get; } = new();
+    public ObservableCollection<FileNoteItem> FileNotes { get; } = new();
 
     // Guards the notes collection: in the app every mutation is dispatcher-marshalled,
     // but under tests (no WPF dispatcher) status updates can apply concurrently.
@@ -477,7 +477,7 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
                 {
                     lock (_notesLock)
                     {
-                        FileNotes.Add(s.Note);
+                        FileNotes.Add(new FileNoteItem(s.Note, s.NotePath));
                         if (FileNotes.Count > MaxFileNotes)
                             FileNotes.RemoveAt(0);
                     }
@@ -887,6 +887,51 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
                 _logger.LogWarning(ex, "Cannot copy to clipboard: {Message}", ex.Message);
                 StatusMessage = $"Cannot copy to clipboard: {ex.Message}";
             }
+        }
+    }
+
+    [RelayCommand]
+    private void CopyNotePath(string? path)
+    {
+        if (!string.IsNullOrWhiteSpace(path))
+        {
+            try
+            {
+                Clipboard.SetText(path);
+                StatusMessage = $"Copied: {path}";
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Cannot copy to clipboard: {Message}", ex.Message);
+                StatusMessage = $"Cannot copy to clipboard: {ex.Message}";
+            }
+        }
+    }
+
+    /// <summary>
+    /// Opens the path a skipped-file note refers to in Explorer: an existing directory opens
+    /// itself, a file is selected in its parent folder (per-entry context menu).
+    /// </summary>
+    [RelayCommand]
+    private void OpenNoteInExplorer(FileNoteItem? item)
+    {
+        if (item is null || string.IsNullOrWhiteSpace(item.Path))
+        {
+            return;
+        }
+
+        try
+        {
+            var path = item.Path;
+            var arguments = System.IO.Directory.Exists(path)
+                ? $"\"{path}\""
+                : $" /select,\"{path}\"";
+            Process.Start(new ProcessStartInfo("explorer.exe", arguments));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Cannot open in Explorer: {Message}", ex.Message);
+            StatusMessage = $"Cannot open in Explorer: {ex.Message}";
         }
     }
 

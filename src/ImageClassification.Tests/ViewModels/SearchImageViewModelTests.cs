@@ -80,6 +80,33 @@ public class SearchImageViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Search_SkippedFileNotes_CarryTextAndPath_ForContextMenu()
+    {
+        // The notes list must be typed (Text + Path) so the per-entry context menu
+        // (Copy path / Open in Explorer) can work off the item, not off string parsing.
+        _vm.SearchDirectories.Add(_tempDir);
+        _vm.QueryText = "autumn";
+        var missing = Path.Combine(_tempDir, "unreadable.png");
+        VmWith(Result(_imgA, 0.9f));
+        _searchService.StatusToReport = new ImageSearchStatus
+        {
+            Note = $"Skipped {missing}: could not be read or decoded",
+            NotePath = missing
+        };
+
+        await _vm.SearchCommand.ExecuteAsync(null);
+
+        var note = Assert.Single(_vm.FileNotes);
+        Assert.Equal($"Skipped {missing}: could not be read or decoded", note.Text);
+        Assert.Equal(missing, note.Path);
+        Assert.Equal(1, _vm.FileNotesCount);
+
+        // The context-menu commands are generated and wired onto the view model.
+        Assert.NotNull(_vm.CopyNotePathCommand);
+        Assert.NotNull(_vm.OpenNoteInExplorerCommand);
+    }
+
+    [Fact]
     public async Task SearchAsync_NoDirectories_PromptsToAddDirectory()
     {
         _vm.QueryText = "autumn";
@@ -264,6 +291,7 @@ public class SearchImageViewModelTests : IDisposable
     {
         public List<ImageSearchResult> Results { get; set; } = new();
         public Exception? Throw { get; set; }
+        public ImageSearchStatus? StatusToReport { get; set; }
         public List<(string Directory, string Query)> SeenCalls { get; } = new();
         public List<ImageSearchOptions?> SeenOptions { get; } = new();
 
@@ -278,6 +306,7 @@ public class SearchImageViewModelTests : IDisposable
             SeenOptions.Add(options);
             if (Throw is not null)
                 throw Throw;
+            status?.Report(StatusToReport ?? new ImageSearchStatus());
             return Task.FromResult(Results);
         }
     }

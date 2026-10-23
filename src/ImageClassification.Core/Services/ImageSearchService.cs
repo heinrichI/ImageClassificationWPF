@@ -66,7 +66,11 @@ internal sealed class ImageSearchService : IImageSearchService
         if (!Directory.Exists(directoryPath))
         {
             _logger.LogWarning("Image search: directory not found: {Dir}", directoryPath);
-            status?.Report(new ImageSearchStatus { Note = $"Directory not found, skipped: {directoryPath}" });
+            status?.Report(new ImageSearchStatus
+            {
+                Note = $"Directory not found, skipped: {directoryPath}",
+                NotePath = directoryPath
+            });
             return [];
         }
 
@@ -224,7 +228,10 @@ internal sealed class ImageSearchService : IImageSearchService
                         skipped++;
                         _logger.LogWarning("Image search: could not read or decode {Path}", item.Path);
                         status?.Report(new ImageSearchStatus
-                            { Note = $"Skipped {item.Path}: could not be read or decoded" });
+                        {
+                            Note = $"Skipped {item.Path}: could not be read or decoded",
+                            NotePath = item.Path
+                        });
                         continue;
                     }
 

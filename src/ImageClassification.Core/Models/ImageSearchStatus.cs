@@ -23,6 +23,9 @@ public sealed record ImageSearchStatus
     /// <summary>Rare diagnostic note (e.g. a file that could not be encoded), shown in the notes list.</summary>
     public string? Note { get; init; }
 
+    /// <summary>Path (file or directory) the <see cref="Note"/> refers to, for copy/open actions; null for generic notes.</summary>
+    public string? NotePath { get; init; }
+
     /// <summary>Full path of the file the pipeline started processing most recently (empty when idle).</summary>
     public string? CurrentFile { get; init; }
 }
