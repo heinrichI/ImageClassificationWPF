@@ -289,6 +289,25 @@ public class SearchImageViewModelTests : IDisposable
     /// </summary>
     private sealed class FakeImageSearchService : IImageSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ImageSearchResult>> SearchByVectorAsync(
+            string directoryPath,
+            float[] queryVector,
+            ImageSearchOptions? options = null,
+            IProgress<ImageSearchStatus>? status = null,
+            CancellationToken ct = default)
+        {
+            SeenCalls.Add((directoryPath, "[hash] " + queryVector.Length));
+            SeenOptions.Add(options);
+            if (Throw is not null)
+                throw Throw;
+            status?.Report(StatusToReport ?? new ImageSearchStatus());
+            return Task.FromResult(Results);
+        }
+
+        public Task<string?> GetImageHashAsync(string imagePath, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         public List<ImageSearchResult> Results { get; set; } = new();
         public Exception? Throw { get; set; }
         public ImageSearchStatus? StatusToReport { get; set; }
@@ -303,6 +322,22 @@ public class SearchImageViewModelTests : IDisposable
             CancellationToken ct = default)
         {
             SeenCalls.Add((directoryPath, query));
+            SeenOptions.Add(options);
+            if (Throw is not null)
+                throw Throw;
+            status?.Report(StatusToReport ?? new ImageSearchStatus());
+            return Task.FromResult(Results);
+        }
+
+        public Task<List<ImageSearchResult>> SearchByImageAsync(
+            string directoryPath,
+            string queryImagePath,
+            ImageSearchOptions? options = null,
+            IProgress<ImageSearchStatus>? status = null,
+            CancellationToken ct = default)
+        {
+            // Mark the call as image-mode so tests can assert the query kind.
+            SeenCalls.Add((directoryPath, "[image] " + queryImagePath));
             SeenOptions.Add(options);
             if (Throw is not null)
                 throw Throw;

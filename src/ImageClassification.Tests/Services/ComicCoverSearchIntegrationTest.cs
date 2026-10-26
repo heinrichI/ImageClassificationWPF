@@ -2,6 +2,7 @@ using ImageClassification.Core.Services;
 using ImageClassification.Tests;
 using ImageClassification.VectorStore;
 using Microsoft.Extensions.Logging;
+using Moq;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace ImageClassification.Tests.Services;
@@ -44,7 +45,7 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         Assert.True(File.Exists(comicPath), $"Comic file not found: {comicPath}");
 
         var service = new ComicCoverSearchService(
-            _archiveReader, _clipTextEncoder, _vectorStore, _batchEncoder, _logger);
+            _archiveReader, _clipTextEncoder, Moq.Mock.Of<IClipImageEncoder>(), _vectorStore, _batchEncoder, _logger);
 
         var dir = Path.GetDirectoryName(comicPath)!;
 
@@ -76,7 +77,7 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         Assert.True(File.Exists(comicPath), $"Comic file not found: {comicPath}");
 
         var service = new ComicCoverSearchService(
-            _archiveReader, _clipTextEncoder, _vectorStore, _batchEncoder, _logger);
+            _archiveReader, _clipTextEncoder, Moq.Mock.Of<IClipImageEncoder>(), _vectorStore, _batchEncoder, _logger);
 
         var dir = Path.GetDirectoryName(comicPath)!;
 
@@ -105,7 +106,7 @@ public sealed class ComicCoverSearchIntegrationTest : IDisposable
         Assert.True(Directory.Exists(dir), $"Directory not found: {dir}");
 
         var service = new ComicCoverSearchService(
-            _archiveReader, _clipTextEncoder, _vectorStore, _batchEncoder, _logger);
+            _archiveReader, _clipTextEncoder, Moq.Mock.Of<IClipImageEncoder>(), _vectorStore, _batchEncoder, _logger);
 
         // Act
         var results = await service.SearchAsync(dir, "beach");

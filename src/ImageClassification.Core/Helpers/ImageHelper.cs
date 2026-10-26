@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
@@ -19,6 +20,11 @@ public static class ImageHelper
 
     public static float[] ImageToTensor(Image<Rgb24> image, int targetSize)
     {
+        // LoadAndResize crops to exactly targetSize x targetSize; a mismatch means the
+        // caller skipped the resize and the channel loops would read out of bounds.
+        Debug.Assert(image.Width == targetSize && image.Height == targetSize,
+            "image must be resized to targetSize before tensorization");
+
         var tensor = new float[3 * targetSize * targetSize];
         float[] mean = { 0.485f, 0.456f, 0.406f };
         float[] std = { 0.229f, 0.224f, 0.225f };

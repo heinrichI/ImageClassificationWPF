@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace ImageClassification.Core.Services;
 
 /// <summary>
@@ -15,6 +17,9 @@ internal sealed class ClusterService : IClusterService
 
         int n = features.Length;
         int dim = features[0].Length;
+        // All rows come from the same encoder model and must share a dimension;
+        // the distance helpers below use Math.Min and would silently hide a mismatch.
+        Debug.Assert(features.All(f => f.Length == dim), "all feature vectors must share the same dimension");
         numClusters = Math.Min(numClusters, n);
 
         // Initialize centroids using k-means++

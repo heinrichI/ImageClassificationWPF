@@ -7,6 +7,7 @@ using System.Windows.Shell;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
@@ -176,6 +177,48 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
     /// </summary>
     [ObservableProperty]
     private string? _selectedPhrase;
+
+    /// <summary>
+    /// Full path of the query image — when set, the search uses this image's CLIP
+    /// embedding ("its ViT hash") instead of the text phrase. The image is encoded with
+    /// the same cached encoder the pipeline uses, so an already-searched file costs
+    /// nothing. Null = text-phrase mode (the query box is used).
+    /// </summary>
+    [ObservableProperty]
+    private string? _queryImagePath;
+
+    /// <summary>File name of <see cref="QueryImagePath"/> for display (the path is long).</summary>
+    [ObservableProperty]
+    private string _queryImageName = string.Empty;
+
+    /// <summary>
+    /// The pasted "ViT hash" (base64 of the CLIP embedding, copied from a result tile
+    /// via right-click → "Copy hash"). While it holds a parseable vector, the
+    /// "Search by hash" button searches with exactly this embedding — no file, no phrase.
+    /// </summary>
+    [ObservableProperty]
+    private string _queryHash = string.Empty;
+
+    /// <summary>True while the hash box holds a non-empty value (drives the clear button).</summary>
+    public bool HasQueryHash => !string.IsNullOrWhiteSpace(QueryHash);
+
+    partial void OnQueryHashChanged(string value)
+    {
+        OnPropertyChanged(nameof(HasQueryHash));
+        SearchByHashCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>True when the query is an image rather than a text phrase.</summary>
+    public bool IsImageQuery => QueryImagePath is not null;
+
+    partial void OnQueryImagePathChanged(string? value)
+    {
+        OnPropertyChanged(nameof(IsImageQuery));
+        if (value is null)
+            QueryImageName = string.Empty;
+        SearchCommand.NotifyCanExecuteChanged();
+        SearchSimilarCoverCommand.NotifyCanExecuteChanged();
+    }
 
     [ObservableProperty]
     private bool _isBusy;
@@ -474,6 +517,136 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             QueryText = query; // the ComboBox reset its text — put the query back
     }
 
+    /// <summary>
+    /// File dialog that picks the query image — switches the search from a text phrase
+    /// to "this image's CLIP embedding" mode (see <see cref="QueryImagePath"/>).
+    /// </summary>
+    [RelayCommand]
+    private void ChooseQueryImage()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select the query image (the search will use its CLIP embedding)",
+            Filter = "Images|*.jpg;*.jpeg;*.png;*.bmp;*.tiff;*.webp|All files|*.*"
+        };
+
+        if (dialog.ShowDialog() == true)
+            SetQueryImage(dialog.FileName);
+    }
+
+    /// <summary>Switches the query back to text-phrase mode.</summary>
+    [RelayCommand]
+    private void ClearQueryImage()
+    {
+        QueryImagePath = null;
+    }
+
+    /// <summary>
+    /// Right-click action on a result tile: find comics with a page similar to THIS one.
+    /// The query is the tile's page vector taken from the vector store ("copy the ViT
+    /// hash" — no archive open, no inference) and the tile's own archive is excluded.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSearchSimilarCover), AllowConcurrentExecutions = false)]
+    private async Task SearchSimilarCoverAsync(ComicCoverItem? item)
+    {
+        if (item is null || IsBusy)
+            return;
+
+        QueryImageName = item.ArchiveFileName;
+        QueryImagePath = item.ArchivePath; // display + mode switch only; the archive-page call below carries the real query
+        _pendingSimilarArchive = (item.ArchivePath, item.PageIndex);
+        await SearchAsync();
+    }
+
+    private bool CanSearchSimilarCover() => !IsBusy;
+
+    /// <summary>
+    /// One-shot query vector set by <see cref="SearchByHashAsync"/> and consumed once by
+    /// the search loop (the next run has none).
+    /// </summary>
+    private float[]? _pendingQueryVector;
+
+    /// <summary>
+    /// Validates the pasted hash and runs the search with that exact embedding
+    /// ("search by hash only"): no file is read, no phrase is encoded. The covers /
+    /// all-pages mode is respected — the hash is compared against covers or every page.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSearchByHash), AllowConcurrentExecutions = false)]
+    private async Task SearchByHashAsync()
+    {
+        if (IsBusy)
+            return;
+
+        if (!VectorCodec.TryParseBase64(QueryHash, out var vector))
+        {
+            StatusMessage = "The pasted hash is not a valid embedding. Copy it from a result tile (right-click → Copy hash) — it is the base64 of the page's float vector.";
+            return;
+        }
+
+        _pendingQueryVector = vector;
+        await SearchAsync();
+    }
+
+    private bool CanSearchByHash()
+        => !IsBusy && VectorCodec.TryParseBase64(QueryHash, out _);
+
+    /// <summary>Empties the hash box (back to phrase/image query modes).</summary>
+    [RelayCommand]
+    private void ClearQueryHash()
+    {
+        QueryHash = string.Empty;
+    }
+
+    /// <summary>
+    /// Right-click action on a result tile: copies the page's "ViT hash" (its CLIP
+    /// embedding in base64 text form) to the clipboard. The vector is taken from the
+    /// vector store (one SQL lookup for a page that was ever searched) or extracted +
+    /// encoded on a cache miss — the pasted hash can then search any archive library.
+    /// </summary>
+    [RelayCommand]
+    private async Task CopyHashAsync(ComicCoverItem? item)
+    {
+        if (item is null || string.IsNullOrWhiteSpace(item.ArchivePath))
+            return;
+
+        try
+        {
+            var hash = await _searchService.GetPageHashAsync(item.ArchivePath, item.PageIndex);
+            if (hash is null)
+            {
+                StatusMessage = $"Could not read the hash of {item.ArchiveFileName} (archive missing or page undecodable).";
+                return;
+            }
+
+            Clipboard.SetText(hash);
+            StatusMessage = $"Copied the hash of {item.ArchiveFileName} ({hash.Length} chars) — paste it into the query box and press 'Search by hash'.";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Copy hash failed for {Path} (page {Page}): {Message}",
+                item.ArchivePath, item.PageIndex + 1, ex.Message);
+            StatusMessage = $"Could not copy the hash: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// When "similar cover" was launched from a tile, the service must query THAT archive's
+    /// page (its cached vector) rather than a loose file — set by SearchSimilarCoverAsync,
+    /// consumed once by the search loop, then cleared.
+    /// </summary>
+    private (string ArchivePath, int PageIndex)? _pendingSimilarArchive;
+
+    /// <summary>Sets the query image (path + display name) and announces the mode switch.</summary>
+    private void SetQueryImage(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        QueryImageName = System.IO.Path.GetFileName(path);
+        QueryImagePath = path; // OnQueryImagePathChanged refreshes the UI + command state
+        StatusMessage = $"Query image set: {System.IO.Path.GetFileName(path)} — the search will use its CLIP embedding";
+    }
+
     [RelayCommand(CanExecute = nameof(CanSearch), AllowConcurrentExecutions = false)]
     private async Task SearchAsync()
     {
@@ -485,8 +658,9 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
 
         _lastProgressUiUpdateUtc = DateTime.MinValue;
         _showingDetail = false;
-        _logger.LogInformation("SearchAsync started. ModeIndex={ModeIndex}, Directories='{Directories}', QueryLength={QueryLength}",
-            SelectedModeIndex, string.Join("; ", SearchDirectories), QueryText?.Length ?? 0);
+        _logger.LogInformation("SearchAsync started. ModeIndex={ModeIndex}, Directories='{Directories}', QueryType={QueryType}",
+            SelectedModeIndex, string.Join("; ", SearchDirectories),
+            _pendingQueryVector is { } pv ? $"hash ({pv.Length} floats)" : (QueryImagePath is null ? $"text (length {QueryText?.Length ?? 0})" : $"image {System.IO.Path.GetFileName(QueryImagePath)}"));
 
         // Validate inputs
         if (SearchDirectories.Count == 0)
@@ -495,15 +669,19 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(QueryText))
+        // A pasted hash, an image, or a phrase — all three are valid queries on their own;
+        // none set → ask the user.
+        if (_pendingQueryVector is null && !IsImageQuery && string.IsNullOrWhiteSpace(QueryText))
         {
-            StatusMessage = "Please enter a search query (e.g. 'beach', 'summer').";
+            StatusMessage = "Please enter a search query (e.g. 'beach', 'summer'), pick a query image, or paste a hash and use 'Search by hash'.";
             return;
         }
 
         // The list the search runs with is what the user wants remembered.
         PersistDirectories();
-        RecordPhraseInHistory(QueryText);
+        // Phrase history is text-only — image and hash queries are one-off and not re-runnable phrases.
+        if (_pendingQueryVector is null && !IsImageQuery)
+            RecordPhraseInHistory(QueryText);
 
         IsBusy = true;
         SelectedInnerTabIndex = 0; // show the settings/progress panel while the search runs
@@ -526,6 +704,13 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         // so Progress<T> is constructed on the UI thread and captures WPF SynchronizationContext.
         var dispatcher = System.Windows.Application.Current?.Dispatcher;
         var currentMode = CurrentMode;
+        // Snapshot the query on the UI thread — the search itself runs on the pool.
+        var queryText = QueryText;
+        var queryImagePath = QueryImagePath;
+        var queryVector = _pendingQueryVector; // one-shot pasted-hash query from SearchByHashAsync
+        _pendingQueryVector = null;
+        var similarArchive = _pendingSimilarArchive; // archive-page query from a tile (one-shot)
+        _pendingSimilarArchive = null;
 
         // Unified status channel: phase markers, preformatted detail lines (per-archive /
         // GPU-queue snapshots) and progress-bar ticks all arrive as ComicSearchStatus.
@@ -648,10 +833,39 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
                     var rootStatus = new Progress<ComicSearchStatus>(s =>
                         outerStatus.Report(string.IsNullOrEmpty(s.Detail) ? s : s with { Detail = $"{dir} | {s.Detail}" }));
 
-                    if (currentMode == SearchMode.AllPages)
-                        merged.AddRange(await _searchService.SearchAllPagesAsync(dir, QueryText, rootStatus, ct).ConfigureAwait(false));
+                    if (queryVector is not null)
+                    {
+                        // Pasted-hash query: the pasted vector is the query, nothing is
+                        // excluded (the hash may refer to any archive, known or not).
+                        if (currentMode == SearchMode.AllPages)
+                            merged.AddRange(await _searchService.SearchAllPagesByVectorAsync(dir, queryVector, rootStatus, ct).ConfigureAwait(false));
+                        else
+                            merged.AddRange(await _searchService.SearchByVectorAsync(dir, queryVector, rootStatus, ct).ConfigureAwait(false));
+                    }
+                    else if (similarArchive is { } byArchive)
+                    {
+                        // "Find similar by this page" from a result tile: the query is the
+                        // archive's page vector (taken from the vector store), the tile's
+                        // own archive is excluded by the service.
+                        if (currentMode == SearchMode.AllPages)
+                            merged.AddRange(await _searchService.SearchAllPagesByArchivePageAsync(dir, byArchive.ArchivePath, byArchive.PageIndex, rootStatus, ct).ConfigureAwait(false));
+                        else
+                            merged.AddRange(await _searchService.SearchByArchivePageAsync(dir, byArchive.ArchivePath, byArchive.PageIndex, rootStatus, ct).ConfigureAwait(false));
+                    }
+                    else if (currentMode == SearchMode.AllPages)
+                    {
+                        if (queryImagePath is not null)
+                            merged.AddRange(await _searchService.SearchAllPagesByImageAsync(dir, queryImagePath, rootStatus, ct).ConfigureAwait(false));
+                        else
+                            merged.AddRange(await _searchService.SearchAllPagesAsync(dir, queryText, rootStatus, ct).ConfigureAwait(false));
+                    }
                     else
-                        merged.AddRange(await _searchService.SearchAsync(dir, QueryText, rootStatus, ct).ConfigureAwait(false));
+                    {
+                        if (queryImagePath is not null)
+                            merged.AddRange(await _searchService.SearchByImageAsync(dir, queryImagePath, rootStatus, ct).ConfigureAwait(false));
+                        else
+                            merged.AddRange(await _searchService.SearchAsync(dir, queryText, rootStatus, ct).ConfigureAwait(false));
+                    }
                 }
 
                 // Nested/overlapping roots can surface the same archive twice — de-duplicate
@@ -680,6 +894,10 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
             // notifications + tab-header re-render) on the UI thread.
             // Every item starts with a same-size placeholder so later real-preview swaps
             // re-render the cell only — no results-panel re-layout per preview.
+            // Requires the UI dispatcher thread (the search itself ran on Task.Run); the
+            // null check keeps the assert inert in unit tests, where no WPF Application exists.
+            Debug.Assert(Application.Current is null || Application.Current.Dispatcher.CheckAccess(),
+                "results must be populated on the UI dispatcher thread");
             var swPopulate = Stopwatch.StartNew();
             var items = new List<ComicCoverItem>(filtered.Count);
             for (var i = 0; i < filtered.Count; i++)
@@ -850,6 +1068,7 @@ public partial class ComicCoverSearchViewModel : ObservableObject, ITabMenuProvi
         _logger.LogInformation("IsBusy changed to {IsBusy}. Search button should be {State}",
             value, value ? "disabled" : "enabled");
         SearchCommand.NotifyCanExecuteChanged();
+        SearchByHashCommand.NotifyCanExecuteChanged();
         CopyResultsImagesCommand.NotifyCanExecuteChanged();
     }
 

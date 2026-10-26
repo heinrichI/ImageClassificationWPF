@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging;
 using ImageClassification.Core.Interfaces;
@@ -356,6 +357,9 @@ internal sealed class SqliteVectorStore : IVectorStore
     public async Task SaveAsync(string modelName, string filePath,
         DateTime lastModified, long fileSize, float[] embedding)
     {
+        // An empty embedding would poison the cache row: every later probe would
+        // "hit" a zero vector that scores 0 against everything.
+        Debug.Assert(embedding is { Length: > 0 }, "embedding must not be empty");
         var conn = _pool.Rent();
         try
         {

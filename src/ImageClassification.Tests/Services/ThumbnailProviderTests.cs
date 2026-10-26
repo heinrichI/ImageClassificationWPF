@@ -49,6 +49,18 @@ public class ThumbnailProviderTests : IDisposable
     /// </summary>
     private sealed class GateCoverService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         private readonly Dictionary<string, TaskCompletionSource<byte[]?>> _gates = new();
         private readonly Dictionary<string, byte[]> _data = new();
 
@@ -69,6 +81,22 @@ public class ThumbnailProviderTests : IDisposable
             => Task.FromResult(new List<ComicCoverResult>());
 
         public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
             IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
             => Task.FromResult(new List<ComicCoverResult>());
 
@@ -649,6 +677,18 @@ public class ThumbnailProviderTests : IDisposable
     /// </summary>
     private sealed class DelayedCoverService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         private readonly int _delayMs;
         private readonly object _lock = new();
         private readonly List<string> _startOrder = new();
@@ -673,6 +713,22 @@ public class ThumbnailProviderTests : IDisposable
             => Task.FromResult(new List<ComicCoverResult>());
 
         public Task<List<ComicCoverResult>> SearchAllPagesAsync(string directoryPath, string query,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => Task.FromResult(new List<ComicCoverResult>());
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
             IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
             => Task.FromResult(new List<ComicCoverResult>());
 

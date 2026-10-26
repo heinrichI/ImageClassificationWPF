@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using ImageClassification.Core.Models;
 using Microsoft.ML.OnnxRuntime;
 using Microsoft.ML.OnnxRuntime.Tensors;
@@ -61,6 +62,7 @@ internal sealed class OnnxClassifier : IImageClassifier
 
         _labels = await File.ReadAllLinesAsync(labelFilePath);
         _labels = _labels.Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
+        Debug.Assert(_labels.Length > 0, "labels file must contain at least one class");
 
         var inputMeta = _session.InputMetadata.First();
         var dims = inputMeta.Value.Dimensions;
@@ -118,6 +120,9 @@ internal sealed class OnnxClassifier : IImageClassifier
 
         using var results = _session.Run(inputs);
         var output = results.First().AsTensor<float>().ToArray();
+        // A mismatch between the model's output dimension and the labels file means
+        // the pair is broken; the "Unknown" fallback below would hide it.
+        Debug.Assert(output.Length == _labels.Length, "model output dimension must match the labels file");
 
         var allProbabilities = new Dictionary<string, float>();
         for (int i = 0; i < _labels.Length && i < output.Length; i++)

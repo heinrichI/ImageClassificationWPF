@@ -3,6 +3,8 @@ using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using Microsoft.Extensions.Logging;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace ImageClassification.Core.Services;
 
@@ -40,28 +42,194 @@ internal sealed class ImageSearchService : IImageSearchService
     };
 
     private readonly IClipTextEncoder _textEncoder;
+    private readonly IClipImageEncoder _imageEncoder;
     private readonly IBatchImageEncoder _batchEncoder;
     private readonly IVectorStore _store;
     private readonly ILogger<ImageSearchService> _logger;
 
     public ImageSearchService(
         IClipTextEncoder textEncoder,
+        IClipImageEncoder imageEncoder,
         IBatchImageEncoder batchEncoder,
         IVectorStore store,
         ILogger<ImageSearchService> logger)
     {
         _textEncoder = textEncoder ?? throw new ArgumentNullException(nameof(textEncoder));
+        _imageEncoder = imageEncoder ?? throw new ArgumentNullException(nameof(imageEncoder));
         _batchEncoder = batchEncoder ?? throw new ArgumentNullException(nameof(batchEncoder));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
-    public async Task<List<ImageSearchResult>> SearchAsync(
+    /// <inheritdoc />
+    public Task<List<ImageSearchResult>> SearchAsync(
         string directoryPath,
         string query,
         ImageSearchOptions? options = null,
         IProgress<ImageSearchStatus>? status = null,
         CancellationToken ct = default)
+    {
+        // Text query — same "a photo of" prefix as the comic cover search so the two
+        // tabs share one query/image embedding space.
+        return SearchCoreAsync(directoryPath, options, status, ct,
+            async ct2 =>
+            {
+                status?.Report(new ImageSearchStatus { Phase = "Encoding query text..." });
+                var encSw = Stopwatch.StartNew();
+                var embedding = await _textEncoder.EncodeTextAsync($"a photo of {query}", ct2)
+                    .ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Image search: query text encoded in {Ms} ms", (long)encSw.ElapsedMilliseconds);
+                return embedding;
+            },
+            excludeImagePath: null,
+            queryDescription: $"text '{query}'");
+    }
+
+    /// <inheritdoc />
+    public Task<List<ImageSearchResult>> SearchByImageAsync(
+        string directoryPath,
+        string queryImagePath,
+        ImageSearchOptions? options = null,
+        IProgress<ImageSearchStatus>? status = null,
+        CancellationToken ct = default)
+    {
+        // Fail fast BEFORE the (potentially long) directory scan: an unreadable/undecodable
+        // query image makes the whole search pointless. The encoder re-checks at encode time.
+        if (!File.Exists(queryImagePath))
+        {
+            _logger.LogWarning("Image search: query image not found: {Path}", queryImagePath);
+            status?.Report(new ImageSearchStatus
+            {
+                Note = $"Query image not found: {queryImagePath}",
+                NotePath = queryImagePath
+            });
+            return Task.FromResult(new List<ImageSearchResult>());
+        }
+
+        try
+        {
+            using var probe = Image.Load<Rgb24>(queryImagePath); // decode-only pre-check
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Image search: query image could not be decoded: {Path}", queryImagePath);
+            status?.Report(new ImageSearchStatus
+            {
+                Note = $"Query image could not be read/decoded: {queryImagePath}",
+                NotePath = queryImagePath
+            });
+            return Task.FromResult(new List<ImageSearchResult>());
+        }
+
+        return SearchCoreAsync(directoryPath, options, status, ct,
+            async ct2 =>
+            {
+                status?.Report(new ImageSearchStatus { Phase = "Encoding query image..." });
+                var encSw = Stopwatch.StartNew();
+                // The registered encoder is the caching decorator: for a file that was
+                // ever searched this is a plain vector-store lookup — "copy the ViT hash".
+                var embedding = await _imageEncoder.EncodeImageAsync(queryImagePath, ct2)
+                    .ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Image search: query image encoded in {Ms} ms", (long)encSw.ElapsedMilliseconds);
+                return embedding;
+            },
+            excludeImagePath: queryImagePath,
+            queryDescription: queryImagePath);
+    }
+
+    /// <inheritdoc />
+    public Task<List<ImageSearchResult>> SearchByVectorAsync(
+        string directoryPath,
+        float[] queryVector,
+        ImageSearchOptions? options = null,
+        IProgress<ImageSearchStatus>? status = null,
+        CancellationToken ct = default)
+    {
+        // The vector is user-provided (pasted hash) — an empty one is a UI input
+        // mistake, report it before the (potentially long) directory scan.
+        if (queryVector is null || queryVector.Length == 0)
+        {
+            status?.Report(new ImageSearchStatus
+            {
+                Note = "Query hash is empty — paste the base64 hash copied from a result tile (right-click → Copy hash)."
+            });
+            return Task.FromResult(new List<ImageSearchResult>());
+        }
+
+        return SearchCoreAsync(directoryPath, options, status, ct,
+            _ =>
+            {
+                // No encoding at all: the pasted vector IS the query ("search by hash").
+                status?.Report(new ImageSearchStatus
+                    { Phase = $"Using query hash ({queryVector.Length} floats)..." });
+                return Task.FromResult(queryVector);
+            },
+            excludeImagePath: null,
+            queryDescription: $"hash ({queryVector.Length} floats)");
+    }
+
+    /// <inheritdoc />
+    public async Task<string?> GetImageHashAsync(string imagePath, CancellationToken ct = default)
+    {
+        if (!File.Exists(imagePath))
+            return null;
+
+        DateTime lastModified;
+        long fileSize;
+        try
+        {
+            var fi = new FileInfo(imagePath);
+            lastModified = fi.LastWriteTimeUtc;
+            fileSize = fi.Length;
+        }
+        catch
+        {
+            lastModified = DateTime.MinValue; // stat raced a deletion — treat as a cache miss
+            fileSize = 0;
+        }
+
+        // The store's one-time legacy migration must be done before the lookup can
+        // see migrated rows (same wait the search performs).
+        await _store.WhenReady.ConfigureAwait(false);
+
+        // Cache first: one SQL lookup for a file that was ever searched.
+        try
+        {
+            var cached = await _store.GetAsync(ModelName, imagePath, lastModified, fileSize).ConfigureAwait(false);
+            if (cached is not null && !IsZeroVector(cached))
+                return VectorCodec.ToBase64(cached);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Image hash: cache lookup failed for {Path} — falling back to encoding", imagePath);
+        }
+
+        // Cache miss: encode with the shared caching encoder (it saves the result
+        // back, so the next copy of the same hash is a plain lookup again).
+        var embedding = await _imageEncoder.EncodeImageAsync(imagePath, ct).ConfigureAwait(false);
+        if (embedding is null || IsZeroVector(embedding))
+            return null; // undecodable file
+
+        return VectorCodec.ToBase64(embedding);
+    }
+
+    /// <summary>
+    /// Shared pipeline for both query kinds. <paramref name="queryFactory"/> produces the
+    /// query embedding at the same point the text query used to be encoded (after the
+    /// file scan), so the phase order on screen is identical for both modes. A failing
+    /// query (e.g. the model cannot process the query image) aborts the search with a
+    /// note; cancellation propagates.
+    /// </summary>
+    private async Task<List<ImageSearchResult>> SearchCoreAsync(
+        string directoryPath,
+        ImageSearchOptions? options,
+        IProgress<ImageSearchStatus>? status,
+        CancellationToken ct,
+        Func<CancellationToken, Task<float[]>> queryFactory,
+        string? excludeImagePath,
+        string queryDescription)
     {
         if (!Directory.Exists(directoryPath))
         {
@@ -131,14 +299,28 @@ internal sealed class ImageSearchService : IImageSearchService
 
         status?.Report(new ImageSearchStatus { Phase = $"Found {files.Count} images", Current = 0, Total = files.Count });
 
-        // 2. Query embedding — same "a photo of" prefix as the comic cover search so the
-        //    two tabs share one query/image embedding space.
-        status?.Report(new ImageSearchStatus { Phase = "Encoding query text..." });
-        var encSw = Stopwatch.StartNew();
-        var queryEmbedding = await _textEncoder.EncodeTextAsync($"a photo of {query}", ct)
-            .ConfigureAwait(false);
-        _logger.LogInformation(
-            "Image search: query text encoded in {Ms} ms", (long)encSw.ElapsedMilliseconds);
+        // 2. Query embedding — produced by the caller's factory (text or image variant).
+        //    A failing query aborts the whole search; cancellation propagates.
+        ct.ThrowIfCancellationRequested();
+        float[] queryEmbedding;
+        try
+        {
+            queryEmbedding = await queryFactory(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Image search: query encoding failed: {Description}", queryDescription);
+            status?.Report(new ImageSearchStatus
+            {
+                Note = $"Query could not be encoded: {queryDescription}"
+            });
+            return [];
+        }
+        Debug.Assert(queryEmbedding is { Length: > 0 }, "query embedding must not be empty");
 
         // 3. The store's one-time legacy migration runs on a background thread at startup.
         //    It has almost always finished by the time a search starts; if not, wait for
@@ -169,6 +351,21 @@ internal sealed class ImageSearchService : IImageSearchService
             "Image search: cache probe took {Ms} ms — {Hits} of {Total} files served from the cache ({Miss} to encode)",
             (long)probeSw.ElapsedMilliseconds, cacheHits, files.Count, misses.Count);
         var results = new List<ImageSearchResult>(files.Count);
+
+        // A pasted hash can come from a DIFFERENT model (different dimension). Scoring
+        // such a vector would trip the dimension assert (Debug) or silently produce
+        // garbage (Release) — validate against the first cached vector BEFORE any
+        // scoring and bail out with a note. Cached rows of one model always share a
+        // dimension, so the first hit is a valid sample.
+        if (cacheHits > 0 && hits[0].CachedEmbedding!.Length != queryEmbedding.Length)
+        {
+            status?.Report(new ImageSearchStatus
+            {
+                Note = $"Query hash has {queryEmbedding.Length} floats but the cached embeddings have {hits[0].CachedEmbedding!.Length} — it was copied from a different model."
+            });
+            return [];
+        }
+
         for (var i = 0; i < cacheHits; i++)
         {
             var item = hits[i];
@@ -217,6 +414,27 @@ internal sealed class ImageSearchService : IImageSearchService
                 batchesDone++;
                 encoded += chunk.Count;
 
+                // Dimension guard for the all-misses case (no cached sample above):
+                // the first encoded chunk of the first batch carries the model's
+                // dimension — a mismatched pasted hash is rejected before any scoring.
+                if (batchesDone == 1 && chunkVectors.Length > 0)
+                {
+                    for (var i = 0; i < chunkVectors.Length; i++)
+                    {
+                        if (IsZeroVector(chunkVectors[i]))
+                            continue;
+                        if (chunkVectors[i].Length != queryEmbedding.Length)
+                        {
+                            status?.Report(new ImageSearchStatus
+                            {
+                                Note = $"Query hash has {queryEmbedding.Length} floats but the model produces {chunkVectors[i].Length} — it was copied from a different model."
+                            });
+                            return [];
+                        }
+                        break; // one non-zero sample is enough
+                    }
+                }
+
                 // 6. Score the chunk's vectors and persist them to the per-file cache.
                 //    Zero vectors = the file could not be read/decoded → note, no result.
                 for (var i = 0; i < chunk.Count; i++)
@@ -260,7 +478,9 @@ internal sealed class ImageSearchService : IImageSearchService
                 misses.Count, (misses.Count + batchSize - 1) / batchSize, saved, skipped);
         }
 
-        // 7. Rank: best match first. The VM filters by its similarity threshold.
+        // 7. Rank: best match first. The query file itself (image mode) is excluded —
+        //    it would always score ~100% and sit on top of the list. The VM filters by
+        //    its similarity threshold.
         status?.Report(new ImageSearchStatus
         {
             Phase = "Scoring and ranking results...",
@@ -268,7 +488,10 @@ internal sealed class ImageSearchService : IImageSearchService
             Total = files.Count
         });
 
-        return results.OrderByDescending(r => r.SimilarityScore).ToList();
+        return results
+            .Where(r => excludeImagePath is null || !IsSamePath(r.FilePath, excludeImagePath))
+            .OrderByDescending(r => r.SimilarityScore)
+            .ToList();
     }
 
     /// <summary>
@@ -317,12 +540,17 @@ internal sealed class ImageSearchService : IImageSearchService
         }
     }
 
-    private static ImageSearchResult ToResult(ImageWorkItem item, float score) => new()
+    private static ImageSearchResult ToResult(ImageWorkItem item, float score)
     {
-        FilePath = item.Path,
-        FileName = Path.GetFileName(item.Path),
-        SimilarityScore = score
-    };
+        // A NaN score would silently sink the file to the bottom of the ranked list.
+        Debug.Assert(!float.IsNaN(score), "similarity score must not be NaN");
+        return new()
+        {
+            FilePath = item.Path,
+            FileName = Path.GetFileName(item.Path),
+            SimilarityScore = score
+        };
+    }
 
     private static bool IsZeroVector(float[]? embedding)
     {
@@ -332,6 +560,26 @@ internal sealed class ImageSearchService : IImageSearchService
             if (embedding[i] != 0f)
                 return false;
         return true;
+    }
+
+    /// <summary>
+    /// Path equality for the query-file exclusion: full-path normalized and
+    /// case-insensitive (directory enumeration can return a different case format
+    /// than the caller's path). GetFullPath failures (weird UNC names) fall back to
+    /// a direct comparison rather than breaking the search.
+    /// </summary>
+    private static bool IsSamePath(string a, string? b)
+    {
+        if (b is null)
+            return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>

@@ -6,6 +6,7 @@ using System.Windows.Shell;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
@@ -151,6 +152,48 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
     /// </summary>
     [ObservableProperty]
     private string? _selectedPhrase;
+
+    /// <summary>
+    /// Full path of the query image — when set, the search uses this image's CLIP
+    /// embedding ("its ViT hash") instead of the text phrase. The image is encoded with
+    /// the same cached encoder the pipeline uses, so an already-searched file costs
+    /// nothing. Null = text-phrase mode (the query box is used).
+    /// </summary>
+    [ObservableProperty]
+    private string? _queryImagePath;
+
+    /// <summary>File name of <see cref="QueryImagePath"/> for display (the path is long).</summary>
+    [ObservableProperty]
+    private string _queryImageName = string.Empty;
+
+    /// <summary>
+    /// The pasted "ViT hash" (base64 of the CLIP embedding, copied from a result tile
+    /// via right-click → "Copy hash"). While it holds a parseable vector, the
+    /// "Search by hash" button searches with exactly this embedding — no file, no phrase.
+    /// </summary>
+    [ObservableProperty]
+    private string _queryHash = string.Empty;
+
+    /// <summary>True while the hash box holds a non-empty value (drives the clear button).</summary>
+    public bool HasQueryHash => !string.IsNullOrWhiteSpace(QueryHash);
+
+    partial void OnQueryHashChanged(string value)
+    {
+        OnPropertyChanged(nameof(HasQueryHash));
+        SearchByHashCommand.NotifyCanExecuteChanged();
+    }
+
+    /// <summary>True when the query is an image rather than a text phrase.</summary>
+    public bool IsImageQuery => QueryImagePath is not null;
+
+    partial void OnQueryImagePathChanged(string? value)
+    {
+        OnPropertyChanged(nameof(IsImageQuery));
+        if (value is null)
+            QueryImageName = string.Empty;
+        SearchCommand.NotifyCanExecuteChanged();
+        SearchSimilarCommand.NotifyCanExecuteChanged();
+    }
 
     [ObservableProperty]
     private bool _isBusy;
@@ -367,6 +410,126 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
             PersistDirectories();
     }
 
+    /// <summary>
+    /// File dialog that picks the query image — switches the search from a text phrase
+    /// to "this image's CLIP embedding" mode (see <see cref="QueryImagePath"/>).
+    /// </summary>
+    [RelayCommand]
+    private void ChooseQueryImage()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select the query image (the search will use its CLIP embedding)",
+            Filter = "Images|*.jpg;*.jpeg;*.png;*.bmp;*.tiff;*.webp|All files|*.*"
+        };
+
+        if (dialog.ShowDialog() == true)
+            SetQueryImage(dialog.FileName);
+    }
+
+    /// <summary>Switches the query back to text-phrase mode.</summary>
+    [RelayCommand]
+    private void ClearQueryImage()
+    {
+        QueryImagePath = null;
+    }
+
+    /// <summary>
+    /// Right-click action on a result tile: search for images similar to THAT image.
+    /// Its embedding is already in the vector cache, so encoding the query is free, and
+    /// the service excludes the file itself from the results.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSearchSimilar), AllowConcurrentExecutions = false)]
+    private async Task SearchSimilarAsync(SearchImageItem? item)
+    {
+        if (item is null || IsBusy)
+            return;
+
+        SetQueryImage(item.FilePath);
+        await SearchAsync();
+    }
+
+    private bool CanSearchSimilar() => !IsBusy;
+
+    /// <summary>
+    /// One-shot query vector set by <see cref="SearchByHashAsync"/> and consumed once by
+    /// the search loop (the next run has none) — the same pattern the comic tab uses for
+    /// its tile-driven "find similar by this page" action.
+    /// </summary>
+    private float[]? _pendingQueryVector;
+
+    /// <summary>
+    /// Validates the pasted hash and runs the search with that exact embedding
+    /// ("search by hash only"): no file is read, no phrase is encoded.
+    /// </summary>
+    [RelayCommand(CanExecute = nameof(CanSearchByHash), AllowConcurrentExecutions = false)]
+    private async Task SearchByHashAsync()
+    {
+        if (IsBusy)
+            return;
+
+        if (!VectorCodec.TryParseBase64(QueryHash, out var vector))
+        {
+            StatusMessage = "The pasted hash is not a valid embedding. Copy it from a result tile (right-click → Copy hash) — it is the base64 of the image's float vector.";
+            return;
+        }
+
+        _pendingQueryVector = vector;
+        await SearchAsync();
+    }
+
+    private bool CanSearchByHash()
+        => !IsBusy && VectorCodec.TryParseBase64(QueryHash, out _);
+
+    /// <summary>Empties the hash box (back to phrase/image query modes).</summary>
+    [RelayCommand]
+    private void ClearQueryHash()
+    {
+        QueryHash = string.Empty;
+    }
+
+    /// <summary>
+    /// Right-click action on a result tile: copies the image's "ViT hash" (its CLIP
+    /// embedding in base64 text form) to the clipboard. The vector is taken from the
+    /// vector cache (a plain lookup when the file was ever searched) or encoded on a
+    /// cache miss — the pasted hash can then search any directory on any machine.
+    /// </summary>
+    [RelayCommand]
+    private async Task CopyHashAsync(SearchImageItem? item)
+    {
+        if (item is null || string.IsNullOrWhiteSpace(item.FilePath))
+            return;
+
+        try
+        {
+            var hash = await _searchService.GetImageHashAsync(item.FilePath);
+            if (hash is null)
+            {
+                StatusMessage = $"Could not read the hash of {item.FileName} (file missing or undecodable).";
+                return;
+            }
+
+            Clipboard.SetText(hash);
+            StatusMessage = $"Copied the hash of {item.FileName} ({hash.Length} chars) — paste it into the query box and press 'Search by hash'.";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Copy hash failed for {Path}: {Message}", item.FilePath, ex.Message);
+            StatusMessage = $"Could not copy the hash: {ex.Message}";
+        }
+    }
+
+    /// <summary>Sets the query image (path + display name) and announces the mode switch.</summary>
+    private void SetQueryImage(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        QueryImageName = System.IO.Path.GetFileName(path);
+        QueryImagePath = path; // OnQueryImagePathChanged refreshes the UI + command state
+        StatusMessage = $"Query image set: {System.IO.Path.GetFileName(path)} — the search will use its CLIP embedding";
+    }
+
     private void PersistDirectories() => _settings.SaveImageSearchDirectories(SearchDirectories.ToList());
 
     /// <summary>
@@ -420,8 +583,9 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
 
         _lastProgressUiUpdateUtc = DateTime.MinValue;
         _showingDetail = false;
-        _logger.LogInformation("SearchAsync started. Directories='{Directories}', Recurse={Recurse}, QueryLength={QueryLength}",
-            string.Join("; ", SearchDirectories), RecurseSubfolders, QueryText?.Length ?? 0);
+        _logger.LogInformation("SearchAsync started. Directories='{Directories}', Recurse={Recurse}, QueryType={QueryType}",
+            string.Join("; ", SearchDirectories), RecurseSubfolders,
+            _pendingQueryVector is { } pv ? $"hash ({pv.Length} floats)" : (QueryImagePath is null ? $"text (length {QueryText?.Length ?? 0})" : $"image {System.IO.Path.GetFileName(QueryImagePath)}"));
 
         // Validate inputs
         if (SearchDirectories.Count == 0)
@@ -430,15 +594,19 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
             return;
         }
 
-        if (string.IsNullOrWhiteSpace(QueryText))
+        // A pasted hash, an image, or a phrase — all three are valid queries on their own;
+        // none set → ask the user.
+        if (_pendingQueryVector is null && !IsImageQuery && string.IsNullOrWhiteSpace(QueryText))
         {
-            StatusMessage = "Please enter a search query (e.g. 'autumn forest', 'beach').";
+            StatusMessage = "Please enter a search query (e.g. 'autumn forest', 'beach'), pick a query image, or paste a hash and use 'Search by hash'.";
             return;
         }
 
         // The list the search runs with is what the user wants remembered.
         PersistDirectories();
-        RecordPhraseInHistory(QueryText);
+        // Phrase history is text-only — image and hash queries are one-off and not re-runnable phrases.
+        if (_pendingQueryVector is null && !IsImageQuery)
+            RecordPhraseInHistory(QueryText);
 
         IsBusy = true;
         SelectedInnerTabIndex = 0; // show the settings/progress panel while the search runs
@@ -461,6 +629,11 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
         // so Progress<T> is constructed on the UI thread and captures WPF SynchronizationContext.
         var dispatcher = System.Windows.Application.Current?.Dispatcher;
         var options = new ImageSearchOptions { RecurseSubfolders = RecurseSubfolders };
+        // Snapshot the query on the UI thread — the search itself runs on the pool.
+        var queryText = QueryText;
+        var queryImagePath = QueryImagePath;
+        var queryVector = _pendingQueryVector; // one-shot pasted-hash query from SearchByHashAsync
+        _pendingQueryVector = null;
 
         // Unified status channel: phase markers and progress-bar ticks all arrive as
         // ImageSearchStatus. Phase changes are applied immediately; plain counter ticks
@@ -567,7 +740,13 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
                     var rootStatus = new Progress<ImageSearchStatus>(s =>
                         outerStatus.Report(string.IsNullOrEmpty(s.Detail) ? s : s with { Detail = $"{dir} | {s.Detail}" }));
 
-                    merged.AddRange(await _searchService.SearchAsync(dir, QueryText, options, rootStatus, ct).ConfigureAwait(false));
+                    // Pasted hash > image file > text phrase — the service picks the matching query source.
+                    if (queryVector is not null)
+                        merged.AddRange(await _searchService.SearchByVectorAsync(dir, queryVector, options, rootStatus, ct).ConfigureAwait(false));
+                    else if (queryImagePath is not null)
+                        merged.AddRange(await _searchService.SearchByImageAsync(dir, queryImagePath, options, rootStatus, ct).ConfigureAwait(false));
+                    else
+                        merged.AddRange(await _searchService.SearchAsync(dir, queryText, options, rootStatus, ct).ConfigureAwait(false));
                 }
 
                 // Nested/overlapping roots can surface the same file twice — de-duplicate
@@ -590,6 +769,11 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
             // zone from the top of the list down — the natural scroll direction.
 
             _logger.LogDebug($"Populate the observable collection {filtered.Count}");
+            // Results are assigned to the ObservableCollection below, which requires the
+            // UI dispatcher thread (the search itself ran on Task.Run). The null check
+            // keeps the assert inert in unit tests, where no WPF Application exists.
+            Debug.Assert(Application.Current is null || Application.Current.Dispatcher.CheckAccess(),
+                "results must be populated on the UI dispatcher thread");
             // Build items outside the observable and assign the collection in one go:
             // a single CollectionChanged(Reset) instead of N per-item Adds.
             var swPopulate = Stopwatch.StartNew();
@@ -734,6 +918,7 @@ public partial class SearchImageViewModel : ObservableObject, ITabMenuProvider, 
         _logger.LogInformation("IsBusy changed to {IsBusy}. Search button should be {State}",
             value, value ? "disabled" : "enabled");
         SearchCommand.NotifyCanExecuteChanged();
+        SearchByHashCommand.NotifyCanExecuteChanged();
         CopyResultsImagesCommand.NotifyCanExecuteChanged();
     }
 

@@ -1,3 +1,4 @@
+using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
@@ -11,6 +12,7 @@ public class ComicCoverSearchServiceTests
 {
     private readonly Mock<IArchiveReader> _mockArchiveReader;
     private readonly Mock<IClipTextEncoder> _mockClipTextEncoder;
+    private readonly Mock<IClipImageEncoder> _mockClipImageEncoder;
     private readonly Mock<IVectorStore> _mockVectorStore;
     private readonly Mock<IModelDownloader> _mockDownloader;
     private readonly BatchImageEncoder _batchEncoder;
@@ -19,6 +21,7 @@ public class ComicCoverSearchServiceTests
     {
         _mockArchiveReader = new Mock<IArchiveReader>();
         _mockClipTextEncoder = new Mock<IClipTextEncoder>();
+        _mockClipImageEncoder = new Mock<IClipImageEncoder>();
         _mockVectorStore = new Mock<IVectorStore>();
         // The real store migrates the legacy cache on a background thread; tests must not wait.
         _mockVectorStore.SetupGet(v => v.WhenReady).Returns(Task.CompletedTask);
@@ -567,6 +570,7 @@ public class ComicCoverSearchServiceTests
         var service = new ComicCoverSearchService(
             _mockArchiveReader.Object,
             _mockClipTextEncoder.Object,
+            _mockClipImageEncoder.Object,
             _mockVectorStore.Object,
             _batchEncoder,
             logger);
@@ -726,6 +730,7 @@ public class ComicCoverSearchServiceTests
         return new ComicCoverSearchService(
             _mockArchiveReader.Object,
             _mockClipTextEncoder.Object,
+            _mockClipImageEncoder.Object,
             _mockVectorStore.Object,
             _batchEncoder,
             mockLogger.Object);
@@ -746,6 +751,267 @@ public class ComicCoverSearchServiceTests
         session.Setup(s => s.ExtractAllToMemoryAsync())
             .ReturnsAsync(pages.Select(p => p.Bytes).ToArray());
         return session;
+    }
+
+    // ─────────────────────── Image-query ("copy the ViT hash") mode ───────────────────────
+
+    /// <summary>Writes a real 1x1 PNG — the query-image pre-check decodes the file with ImageSharp.</summary>
+    private static void WriteRealPng(string path)
+    {
+        using var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(1, 1);
+        using var stream = File.Create(path);
+        image.Save(stream, new SixLabors.ImageSharp.Formats.Png.PngEncoder());
+    }
+
+    [Fact]
+    public async Task SearchByArchivePageAsync_CoverMode_CachedCoverVectorIsTheQuery_AndQueryArchiveIsExcluded()
+    {
+        // Covers mode: the pipeline probes the COVER rows, and the query factory falls
+        // back to the cover row for a page-0 query. Everything is answered from the
+        // store — "copy the hash" means no archive open and no encoding at all.
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var queryPath = Path.Combine(searchDir, "query_archive.cbz");
+        var otherPath = Path.Combine(searchDir, "other_archive.cbz");
+        await File.WriteAllBytesAsync(queryPath, []);
+        await File.WriteAllBytesAsync(otherPath, []);
+
+        var service = CreateService();
+
+        var queryVector = CreateEmbedding(1f);
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), queryPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(queryVector);
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), otherPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(queryVector); // identical cover vector → 1.0 similarity
+
+        try
+        {
+            var results = await service.SearchByArchivePageAsync(searchDir, queryPath, 0);
+
+            // The query archive itself is excluded; the other archive (identical cover
+            // vector) scores 1.0.
+            var other = Assert.Single(results);
+            Assert.Equal(otherPath, other.ArchivePath);
+            Assert.Equal(1f, other.SimilarityScore, 5);
+
+            _mockArchiveReader.Verify(r => r.OpenSessionAsync(It.IsAny<string>()), Times.Never);
+            _mockClipImageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            _mockClipTextEncoder.Verify(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchAllPagesByArchivePageAsync_ArchiveRowIsTheQuery_AndQueryArchiveIsExcluded()
+    {
+        // All-pages mode: the pipeline probes the ARCHIVE rows (every page), and the
+        // query factory takes the page vector straight from the query archive's row.
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var queryPath = Path.Combine(searchDir, "query_archive.cbz");
+        var otherPath = Path.Combine(searchDir, "other_archive.cbz");
+        await File.WriteAllBytesAsync(queryPath, []);
+        await File.WriteAllBytesAsync(otherPath, []);
+
+        var service = CreateService();
+
+        var queryVector = CreateEmbedding(1f);
+        _mockVectorStore
+            .Setup(s => s.GetArchiveAsync(It.IsAny<string>(), queryPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .Returns(Task.FromResult<(int, float[][])?>((1, new[] { queryVector })));
+        _mockVectorStore
+            .Setup(s => s.GetArchiveAsync(It.IsAny<string>(), otherPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .Returns(Task.FromResult<(int, float[][])?>((2, new[] { queryVector, queryVector })));
+
+        try
+        {
+            var results = await service.SearchAllPagesByArchivePageAsync(searchDir, queryPath, 0);
+
+            // The query archive is excluded; the other archive contributes both pages
+            // (identical vectors → 1.0 each).
+            Assert.Equal(2, results.Count);
+            Assert.All(results, r =>
+            {
+                Assert.Equal(otherPath, r.ArchivePath);
+                Assert.Equal(1f, r.SimilarityScore, 5);
+            });
+
+            _mockArchiveReader.Verify(r => r.OpenSessionAsync(It.IsAny<string>()), Times.Never);
+            _mockClipImageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            _mockClipTextEncoder.Verify(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchByImageAsync_MissingQueryFile_ReturnsEmptyAndReportsNote()
+    {
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        await File.WriteAllBytesAsync(Path.Combine(searchDir, "a.cbz"), []);
+
+        var service = CreateService();
+        var updates = new System.Collections.Generic.List<ComicSearchStatus>();
+
+        try
+        {
+            var results = await service.SearchByImageAsync(
+                searchDir,
+                Path.Combine(searchDir, "no-such.png"),
+                new StatusCollector(updates));
+
+            Assert.Empty(results);
+            Assert.Contains(updates, u => u.Note is not null && u.Note.Contains("not found"));
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    // ─────────────────────── Hash-query ("search by hash") mode ───────────────────────
+
+    [Fact]
+    public async Task SearchByVectorAsync_CoverMode_ScoresCoverRows_AndNeverOpensArchives()
+    {
+        // The pasted hash is the query itself: everything is answered from the store
+        // (cover rows), nothing is encoded, no archive is opened, nothing is excluded.
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var aPath = Path.Combine(searchDir, "a_archive.cbz");
+        var bPath = Path.Combine(searchDir, "b_archive.cbz");
+        await File.WriteAllBytesAsync(aPath, []);
+        await File.WriteAllBytesAsync(bPath, []);
+
+        var service = CreateService();
+
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), aPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f));     // identical to the query → 1.0
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), bPath, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(0.6f));  // dot product with the query → 0.6
+
+        try
+        {
+            var results = await service.SearchByVectorAsync(searchDir, CreateEmbedding(1f));
+
+            Assert.Equal(2, results.Count);
+            Assert.Equal(aPath, results[0].ArchivePath);
+            Assert.Equal(1f, results[0].SimilarityScore, 5);
+            Assert.Equal(bPath, results[1].ArchivePath);
+            Assert.Equal(0.6f, results[1].SimilarityScore, 5);
+
+            _mockArchiveReader.Verify(r => r.OpenSessionAsync(It.IsAny<string>()), Times.Never);
+            _mockClipImageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            _mockClipTextEncoder.Verify(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task SearchByVectorAsync_EmptyVector_ReportsNoteAndReturnsEmpty()
+    {
+        var service = CreateService();
+        var updates = new System.Collections.Generic.List<ComicSearchStatus>();
+
+        var results = await service.SearchByVectorAsync(
+            Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()), [], new StatusCollector(updates));
+
+        Assert.Empty(results);
+        Assert.Contains("Query hash is empty", Assert.Single(updates).Note);
+    }
+
+    [Fact]
+    public async Task SearchByVectorAsync_DimensionMismatchWithCache_ReportsNote()
+    {
+        // A hash pasted from a DIFFERENT model (3 floats vs the 512-float cache rows)
+        // must abort with a note instead of scoring garbage (or tripping the Debug
+        // dimension assert in VectorMath).
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+        await File.WriteAllBytesAsync(Path.Combine(searchDir, "a_archive.cbz"), []);
+
+        var service = CreateService();
+        _mockVectorStore
+            .Setup(s => s.GetCoverAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(CreateEmbedding(1f)); // 512-d cache rows
+
+        var updates = new System.Collections.Generic.List<ComicSearchStatus>();
+        try
+        {
+            var results = await service.SearchByVectorAsync(searchDir, [1f, 0f, 0f], new StatusCollector(updates));
+
+            Assert.Empty(results);
+            Assert.Contains("different model", updates[^1].Note);
+            _mockArchiveReader.Verify(r => r.OpenSessionAsync(It.IsAny<string>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    [Fact]
+    public async Task GetPageHashAsync_ReturnsBase64OfArchivedPage_AndNeverOpensArchive()
+    {
+        // "Copy hash" on a tile: the page vector comes straight from the store row.
+        var searchDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+        Directory.CreateDirectory(searchDir);
+
+        var path = Path.Combine(searchDir, "a_archive.cbz");
+        await File.WriteAllBytesAsync(path, []);
+
+        var service = CreateService();
+        _mockVectorStore
+            .Setup(s => s.GetArchiveAsync(It.IsAny<string>(), path, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .Returns(Task.FromResult<(int, float[][])?>((2, new[] { CreateEmbedding(1f), CreateEmbedding(2f) })));
+
+        try
+        {
+            var hash = await service.GetPageHashAsync(path, 0);
+
+            Assert.NotNull(hash);
+            Assert.True(VectorCodec.TryParseBase64(hash, out var parsed));
+            Assert.Equal(CreateEmbedding(1f), parsed);
+
+            _mockArchiveReader.Verify(r => r.OpenSessionAsync(It.IsAny<string>()), Times.Never);
+        }
+        finally
+        {
+            Directory.Delete(searchDir, true);
+        }
+    }
+
+    /// <summary>Collects status updates for assertions (IProgress<T> is fire-and-forget).</summary>
+    private sealed class StatusCollector : System.IProgress<ComicSearchStatus>
+    {
+        private readonly object _lock = new();
+        private readonly System.Collections.Generic.List<ComicSearchStatus> _list;
+
+        public StatusCollector(System.Collections.Generic.List<ComicSearchStatus> list)
+        {
+            _list = list;
+        }
+
+        public void Report(ComicSearchStatus value)
+        {
+            lock (_lock) _list.Add(value);
+        }
     }
 
     private static float[] CreateEmbedding(float firstValue)

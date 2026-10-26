@@ -1,14 +1,20 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using Microsoft.Extensions.Logging;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.PixelFormats;
 
 namespace ImageClassification.Core.Services;
 
 /// <summary>
 /// Scans CBZ/CBR archives and ranks their covers (or all pages) by CLIP
-/// cosine similarity against a user text query.
+/// cosine similarity against a user query — either a text phrase (encoded with
+/// the "a photo of" prefix) or an image (a loose file on disk, or a known page
+/// of an archive whose cached ViT embedding is "copied" as the query). Image and
+/// text queries live in the same embedding space, so one vector cache serves both.
 /// Uses BatchImageEncoder for batched GPU inference and IVectorStore for caching.
 ///
 /// Pipeline: each archive is opened exactly once via IArchiveReader.OpenSessionAsync;
@@ -27,6 +33,7 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
 
     private readonly IArchiveReader _archiveReader;
     private readonly IClipTextEncoder _textEncoder;
+    private readonly IClipImageEncoder _imageEncoder;
     private readonly IVectorStore _store;
     private readonly IBatchImageEncoder _batchEncoder;
     private readonly ILogger<ComicCoverSearchService> _logger;
@@ -34,12 +41,14 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     public ComicCoverSearchService(
         IArchiveReader archiveReader,
         IClipTextEncoder textEncoder,
+        IClipImageEncoder imageEncoder,
         IVectorStore store,
         IBatchImageEncoder batchEncoder,
         ILogger<ComicCoverSearchService> logger)
     {
         _archiveReader = archiveReader ?? throw new ArgumentNullException(nameof(archiveReader));
         _textEncoder = textEncoder ?? throw new ArgumentNullException(nameof(textEncoder));
+        _imageEncoder = imageEncoder ?? throw new ArgumentNullException(nameof(imageEncoder));
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _batchEncoder = batchEncoder ?? throw new ArgumentNullException(nameof(batchEncoder));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
@@ -82,7 +91,12 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         IProgress<ComicSearchStatus>? status = null,
         CancellationToken ct = default)
     {
-        return SearchCoreAsync(directoryPath, query, allPages: false, status, ct);
+        // Text query — same "a photo of" prefix as the image tab so both tabs
+        // share one query/image embedding space.
+        return SearchCoreAsync(directoryPath, allPages: false, status, ct,
+            CreateTextQueryFactory(query, status),
+            excludeArchivePath: null,
+            queryDescription: $"text '{query}'");
     }
 
     /// <inheritdoc />
@@ -92,25 +106,265 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
         IProgress<ComicSearchStatus>? status = null,
         CancellationToken ct = default)
     {
-        return SearchCoreAsync(directoryPath, query, allPages: true, status, ct);
+        return SearchCoreAsync(directoryPath, allPages: true, status, ct,
+            CreateTextQueryFactory(query, status),
+            excludeArchivePath: null,
+            queryDescription: $"text '{query}'");
+    }
+
+    /// <inheritdoc />
+    public Task<List<ComicCoverResult>> SearchByImageAsync(
+        string directoryPath,
+        string queryImagePath,
+        IProgress<ComicSearchStatus>? status = null,
+        CancellationToken ct = default)
+    {
+        return SearchByImageFileAsync(directoryPath, allPages: false, queryImagePath, status, ct);
+    }
+
+    /// <inheritdoc />
+    public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(
+        string directoryPath,
+        string queryImagePath,
+        IProgress<ComicSearchStatus>? status = null,
+        CancellationToken ct = default)
+    {
+        return SearchByImageFileAsync(directoryPath, allPages: true, queryImagePath, status, ct);
+    }
+
+    /// <inheritdoc />
+    public Task<List<ComicCoverResult>> SearchByArchivePageAsync(
+        string directoryPath,
+        string queryArchivePath,
+        int queryPageIndex,
+        IProgress<ComicSearchStatus>? status = null,
+        CancellationToken ct = default)
+    {
+        return SearchByArchivePageAsync(directoryPath, allPages: false, queryArchivePath, queryPageIndex, status, ct);
+    }
+
+    /// <inheritdoc />
+    public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(
+        string directoryPath,
+        string queryArchivePath,
+        int queryPageIndex,
+        IProgress<ComicSearchStatus>? status = null,
+        CancellationToken ct = default)
+    {
+        return SearchByArchivePageAsync(directoryPath, allPages: true, queryArchivePath, queryPageIndex, status, ct);
     }
 
     /// <summary>
-    /// Shared pipeline for both modes. The only difference: covers mode processes
-    /// page 0 of each archive, all-pages mode processes every enumerated page.
+    /// Loose-image query ("search by this file"): fails fast BEFORE the (potentially
+    /// long) archive scan when the file is missing or undecodable — the encoder
+    /// re-checks at the encode step anyway.
+    /// </summary>
+    private Task<List<ComicCoverResult>> SearchByImageFileAsync(
+        string directoryPath, bool allPages, string queryImagePath,
+        IProgress<ComicSearchStatus>? status, CancellationToken ct)
+    {
+        if (!File.Exists(queryImagePath))
+        {
+            _logger.LogWarning("[Query] Image query file not found: {Path}", queryImagePath);
+            status?.Report(new ComicSearchStatus
+            {
+                Note = $"Query image not found: {queryImagePath}"
+            });
+            return Task.FromResult(new List<ComicCoverResult>());
+        }
+
+        try
+        {
+            using var probe = Image.Load<Rgb24>(queryImagePath); // decode-only pre-check
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Query] Image query could not be decoded: {Path}", queryImagePath);
+            status?.Report(new ComicSearchStatus
+            {
+                Note = $"Query image could not be read/decoded: {queryImagePath}"
+            });
+            return Task.FromResult(new List<ComicCoverResult>());
+        }
+
+        return SearchCoreAsync(directoryPath, allPages, status, ct,
+            CreateImageFileQueryFactory(queryImagePath, status),
+            excludeArchivePath: queryImagePath, // no-op unless the "archive" is the file itself
+            queryDescription: queryImagePath);
+    }
+
+    /// <summary>
+    /// Known-archive-page query ("copy the tile's ViT hash"): the page vector is
+    /// almost always taken from the vector store (no archive open, no inference).
+    /// The query archive itself is excluded from the results.
+    /// </summary>
+    private Task<List<ComicCoverResult>> SearchByArchivePageAsync(
+        string directoryPath, bool allPages, string queryArchivePath, int queryPageIndex,
+        IProgress<ComicSearchStatus>? status, CancellationToken ct)
+    {
+        if (!File.Exists(queryArchivePath))
+        {
+            _logger.LogWarning("[Query] Query archive not found: {Path}", queryArchivePath);
+            status?.Report(new ComicSearchStatus
+            {
+                Note = $"Query archive not found: {queryArchivePath}"
+            });
+            return Task.FromResult(new List<ComicCoverResult>());
+        }
+
+        return SearchCoreAsync(directoryPath, allPages, status, ct,
+            CreateArchivePageQueryFactory(queryArchivePath, queryPageIndex, status),
+            excludeArchivePath: queryArchivePath,
+            queryDescription: $"{queryArchivePath} (page {queryPageIndex + 1})");
+    }
+
+    /// <summary>Text-phrase query factory: encodes with the shared "a photo of" prefix.</summary>
+    private Func<Stopwatch, CancellationToken, Task<float[]>> CreateTextQueryFactory(
+        string query, IProgress<ComicSearchStatus>? status)
+    {
+        return async (sw, ct) =>
+        {
+            ReportPhase(status, ct, "Encoding query text...");
+            var t0 = sw.Elapsed;
+            var embedding = await _textEncoder.EncodeTextAsync($"a photo of {query}", ct).ConfigureAwait(false);
+            _logger.LogInformation("[Query] Text query encoded in {Ms}ms", (sw.Elapsed - t0).TotalMilliseconds);
+            return embedding;
+        };
+    }
+
+    /// <summary>Loose-image query factory: the caching encoder makes an already-searched file a plain store lookup.</summary>
+    private Func<Stopwatch, CancellationToken, Task<float[]>> CreateImageFileQueryFactory(
+        string imagePath, IProgress<ComicSearchStatus>? status)
+    {
+        return async (sw, ct) =>
+        {
+            ReportPhase(status, ct, "Encoding query image...");
+            var t0 = sw.Elapsed;
+            var embedding = await _imageEncoder.EncodeImageAsync(imagePath, ct).ConfigureAwait(false);
+            _logger.LogInformation(
+                "[Query] Image query encoded in {Ms}ms: {Path}", (sw.Elapsed - t0).TotalMilliseconds, imagePath);
+            return embedding;
+        };
+    }
+
+    /// <inheritdoc />
+    public Task<List<ComicCoverResult>> SearchByVectorAsync(
+        string directoryPath,
+        float[] queryVector,
+        IProgress<ComicSearchStatus>? status = null,
+        CancellationToken ct = default)
+        => SearchByVectorCoreAsync(directoryPath, allPages: false, queryVector, status, ct);
+
+    /// <inheritdoc />
+    public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(
+        string directoryPath,
+        float[] queryVector,
+        IProgress<ComicSearchStatus>? status = null,
+        CancellationToken ct = default)
+        => SearchByVectorCoreAsync(directoryPath, allPages: true, queryVector, status, ct);
+
+    /// <inheritdoc />
+    public async Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+    {
+        if (pageIndex < 0 || !File.Exists(archivePath))
+            return null;
+
+        // The store's one-time legacy migration must be done before the lookup can see
+        // migrated rows (the search core performs the same wait before its probes).
+        await _store.WhenReady.ConfigureAwait(false);
+
+        try
+        {
+            // Store first (one SQL lookup for a page that was ever searched), archive
+            // open + encode only on a cache miss — the same resolution a tile's
+            // "Find similar by this page" uses.
+            var embedding = await ResolveArchivePageQueryAsync(archivePath, pageIndex, ct).ConfigureAwait(false);
+            return IsZeroVector(embedding) ? null : VectorCodec.ToBase64(embedding);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Hash] Could not resolve the page hash of {Path} (page {Page})",
+                archivePath, pageIndex + 1);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Pasted-hash search: the user-provided vector is used as-is as the query
+    /// (no encoding, no self-exclusion). An empty vector is a UI input mistake —
+    /// report it before the (potentially long) archive scan. A dimension mismatch
+    /// with the cached embeddings is caught by the core (see SearchCoreAsync).
+    /// </summary>
+    private Task<List<ComicCoverResult>> SearchByVectorCoreAsync(
+        string directoryPath, bool allPages, float[]? queryVector,
+        IProgress<ComicSearchStatus>? status, CancellationToken ct)
+    {
+        if (queryVector is null || queryVector.Length == 0)
+        {
+            status?.Report(new ComicSearchStatus
+            {
+                Note = "Query hash is empty — paste the base64 hash copied from a result tile (right-click → Copy hash)."
+            });
+            return Task.FromResult(new List<ComicCoverResult>());
+        }
+
+        return SearchCoreAsync(directoryPath, allPages, status, ct,
+            CreateVectorQueryFactory(queryVector, status),
+            excludeArchivePath: null,
+            queryDescription: $"hash ({queryVector.Length} floats)",
+            validateQueryDimension: true);
+    }
+
+    /// <summary>Known-archive-page query factory: store first, archive open + encode only on a miss.</summary>
+    private Func<Stopwatch, CancellationToken, Task<float[]>> CreateArchivePageQueryFactory(
+        string archivePath, int pageIndex, IProgress<ComicSearchStatus>? status)
+    {
+        return async (sw, ct) =>
+        {
+            ReportPhase(status, ct, "Loading query image (page hash from cache first)...");
+            var t0 = sw.Elapsed;
+            var embedding = await ResolveArchivePageQueryAsync(archivePath, pageIndex, ct).ConfigureAwait(false);
+            _logger.LogInformation(
+                "[Query] Archive page query resolved in {Ms}ms: {Path} page {Page}",
+                (sw.Elapsed - t0).TotalMilliseconds, archivePath, pageIndex);
+            return embedding;
+        };
+    }
+
+    /// <summary>Pasted-hash query factory: the vector is used as-is, nothing is encoded.</summary>
+    private static Func<Stopwatch, CancellationToken, Task<float[]>> CreateVectorQueryFactory(
+        float[] vector, IProgress<ComicSearchStatus>? status)
+    {
+        return (sw, ct) =>
+        {
+            ReportPhase(status, ct, $"Using query hash ({vector.Length} floats)...");
+            return Task.FromResult(vector);
+        };
+    }
+
+    /// <summary>
+    /// Shared pipeline for all query kinds and modes. The only mode difference: covers
+    /// mode processes page 0 of each archive, all-pages mode processes every page.
+    /// <paramref name="queryFactory"/> produces the query embedding at the point the text
+    /// query used to be encoded (after the archive scan), so the phase order on screen
+    /// is identical for text and image queries. Results of <paramref name="excludeArchivePath"/>
+    /// are dropped (the query archive itself would score ~100% against itself).
     /// </summary>
     private async Task<List<ComicCoverResult>> SearchCoreAsync(
         string directoryPath,
-        string query,
         bool allPages,
         IProgress<ComicSearchStatus>? status,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<Stopwatch, CancellationToken, Task<float[]>> queryFactory,
+        string? excludeArchivePath,
+        string queryDescription,
+        bool validateQueryDimension = false)
     {
-        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var sw = Stopwatch.StartNew();
         var label = allPages ? "SearchAllPages" : "Search";
         _logger.LogInformation(
-            "[{Label}] Started — query='{Query}' dir='{Dir}' vectorCache='{CachePath}'",
-            label, query, directoryPath, _store.DatabasePath ?? "<in-memory>");
+            "[{Label}] Started — query={Query} dir='{Dir}' vectorCache='{CachePath}'",
+            label, queryDescription, directoryPath, _store.DatabasePath ?? "<in-memory>");
 
         if (!Directory.Exists(directoryPath))
         {
@@ -135,12 +389,62 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
             ? "Found 1 archive"
             : $"Found {archiveFiles.Count} archives");
 
-        // 2. Encode the text query once
-        ReportPhase(status, ct, "Encoding query text...");
+        // 2. Query embedding — produced by the caller's factory: a text phrase (encoded
+        //    with the "a photo of" prefix) or an image (its cached ViT embedding —
+        //    "copy the hash"). A failing query aborts the search with a note; a
+        //    cancelled query propagates.
+        ReportPhase(status, ct, "Preparing query...");
         t0 = sw.Elapsed;
-        var queryEmbedding = await _textEncoder
-            .EncodeTextAsync($"a photo of {query}", ct).ConfigureAwait(false);
-        _logger.LogInformation("[{Label}] Text encoding: {Ms}ms", label, (sw.Elapsed - t0).TotalMilliseconds);
+        float[] queryEmbedding;
+        try
+        {
+            queryEmbedding = await queryFactory(sw, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[{Label}] Query failed: {Description}", label, queryDescription);
+            if (!ct.IsCancellationRequested)
+            {
+                ReportPhase(status, ct, "Query failed — no results");
+                status?.Report(new ComicSearchStatus
+                {
+                    Note = $"Query could not be processed: {queryDescription}"
+                });
+            }
+            return new List<ComicCoverResult>();
+        }
+        Debug.Assert(queryEmbedding is { Length: > 0 }, "query embedding must not be empty");
+        _logger.LogInformation("[{Label}] Query ready in {Ms}ms", label, (sw.Elapsed - t0).TotalMilliseconds);
+
+        // 2.2. A PASTED hash can come from a different model (different dimension).
+        // Scoring such a vector would trip the dimension assert (Debug) or silently
+        // produce garbage (Release) — validate against a sample of the cached rows
+        // (one SQL lookup on the first scanned archive) and bail out with a note.
+        // Text/image queries always match the cache's model, so this runs only for
+        // the vector (hash) variant. When no sample row exists (a directory never
+        // searched) the check is skipped — there is nothing to compare against.
+        if (validateQueryDimension)
+        {
+            var sampleLength = await ProbeSampleDimensionAsync(archiveFiles[0], allPages).ConfigureAwait(false);
+            if (sampleLength is not null && sampleLength != queryEmbedding.Length)
+            {
+                _logger.LogWarning("[{Label}] Query hash dimension {QueryDim} != cached dimension {SampleDim}",
+                    label, queryEmbedding.Length, sampleLength);
+                if (!ct.IsCancellationRequested)
+                {
+                    ReportPhase(status, ct, "Query failed — no results");
+                    status?.Report(new ComicSearchStatus
+                    {
+                        Note = $"Query hash has {queryEmbedding.Length} floats but the cached embeddings have {sampleLength} — it was copied from a different model."
+                    });
+                }
+                return new List<ComicCoverResult>();
+            }
+        }
 
         // 2.5. The store's one-time legacy migration runs on a background thread at
         // startup. It has almost always finished by the time a search starts; if not,
@@ -170,6 +474,10 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
                 queryEmbedding,
                 r =>
                 {
+                    // The query archive itself is excluded — its own cover/page would
+                    // score ~100% and top the list (image queries only; text has none).
+                    if (excludeArchivePath is not null && IsSameArchivePath(r.ArchivePath, excludeArchivePath))
+                        return;
                     lock (resultsLock) results.Add(r);
                 },
                 (done, _) => ReportProgressTick(status, ct, done, total),
@@ -584,6 +892,57 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// The dimension of whatever cached embedding row the archive has (all-pages row
+    /// first, then cover row) — the sample the pasted-hash dimension check compares
+    /// against. Null when the archive has no cached rows at all.
+    /// </summary>
+    private async Task<int?> ProbeSampleDimensionAsync(string archivePath, bool allPages)
+    {
+        DateTime lastModified;
+        long fileSize;
+        try
+        {
+            var fi = new FileInfo(archivePath);
+            lastModified = fi.LastWriteTimeUtc;
+            fileSize = fi.Length;
+        }
+        catch
+        {
+            lastModified = DateTime.MinValue;
+            fileSize = 0;
+        }
+
+        if (allPages)
+        {
+            var archived = await GetArchiveCachedAsync(archivePath, lastModified, fileSize);
+            if (archived is not null)
+            {
+                foreach (var page in archived.Value.Pages)
+                    if (page is not null && !IsZeroVector(page))
+                        return page.Length;
+            }
+
+            var cover = await GetCoverCachedAsync(archivePath, lastModified, fileSize);
+            if (cover is not null && !IsZeroVector(cover))
+                return cover.Length;
+            return null;
+        }
+
+        var coverHit = await GetCoverCachedAsync(archivePath, lastModified, fileSize);
+        if (coverHit is not null && !IsZeroVector(coverHit))
+            return coverHit.Length;
+
+        var archivedHit = await GetArchiveCachedAsync(archivePath, lastModified, fileSize);
+        if (archivedHit is not null)
+        {
+            foreach (var page in archivedHit.Value.Pages)
+                if (page is not null && !IsZeroVector(page))
+                    return page.Length;
+        }
+        return null;
+    }
+
+    /// <summary>
     /// Fresh "archive_embeddings" row of the archive — the whole page array plus its
     /// page count — or null when the row is missing / stale / the store fails. A
     /// throwing store (locked/corrupt DB) must not break the search: the archive is
@@ -627,14 +986,132 @@ internal sealed class ComicCoverSearchService : IComicCoverSearchService
     private static ComicCoverResult ToResult(
         string archivePath, int pageIndex, int pageCount, float[] embedding, float[] queryEmbedding)
     {
+        var score = VectorMath.CosineSimilarity(embedding, queryEmbedding);
+        // A NaN score would silently sink the result to the bottom of the ranked list.
+        Debug.Assert(!float.IsNaN(score), "similarity score must not be NaN");
         return new ComicCoverResult
         {
             ArchivePath = archivePath,
             ArchiveFileName = Path.GetFileName(archivePath),
-            SimilarityScore = VectorMath.CosineSimilarity(embedding, queryEmbedding),
+            SimilarityScore = score,
             PageIndex = pageIndex,
             PageCount = pageCount
         };
+    }
+
+    /// <summary>
+    /// Resolves the query embedding of a KNOWN archive page: fresh store rows win —
+    /// the all-pages row (every page) or the cover row (page 0) is a single SQL
+    /// lookup, no archive open and no inference, i.e. a literal "copy the ViT hash".
+    /// On a miss the page is extracted from the archive and encoded; a page-0 result
+    /// is persisted as the cover row so the next lookup hits.
+    /// </summary>
+    private async Task<float[]> ResolveArchivePageQueryAsync(string archivePath, int pageIndex, CancellationToken ct)
+    {
+        DateTime lastModified;
+        long fileSize;
+        try
+        {
+            var fi = new FileInfo(archivePath);
+            lastModified = fi.LastWriteTimeUtc;
+            fileSize = fi.Length;
+        }
+        catch
+        {
+            lastModified = DateTime.MinValue; // stat raced a deletion — treat as a cache miss
+            fileSize = 0;
+        }
+
+        if (pageIndex >= 0)
+        {
+            // All-pages rows carry every page — a tile shown by an all-pages search
+            // almost always has its row already.
+            var archived = await GetArchiveCachedAsync(archivePath, lastModified, fileSize);
+            if (archived is not null)
+            {
+                var (_, pages) = archived.Value;
+                if (pageIndex < pages.Length && pages[pageIndex] is { } pageVec && !IsZeroVector(pageVec))
+                    return pageVec;
+            }
+        }
+
+        if (pageIndex == 0)
+        {
+            var cover = await GetCoverCachedAsync(archivePath, lastModified, fileSize);
+            if (cover is not null && !IsZeroVector(cover))
+                return cover;
+        }
+
+        // Cache miss: open the archive, extract the page, encode it.
+        using var session = await _archiveReader.OpenSessionAsync(archivePath).ConfigureAwait(false);
+        if (pageIndex < 0 || pageIndex >= session.ImageEntries.Count)
+            throw new InvalidOperationException(
+                $"Page {pageIndex + 1} is out of range in {Path.GetFileName(archivePath)}");
+
+        var bytes = await session.ExtractToMemoryAsync(pageIndex).ConfigureAwait(false);
+        if (bytes is null || bytes.Length == 0)
+            throw new InvalidOperationException(
+                $"Page {pageIndex + 1} of {Path.GetFileName(archivePath)} extracted empty");
+
+        var embeddings = await _batchEncoder
+            .EncodeImagesFromMemoryBatchAsync(new List<(int, byte[])> { (0, bytes) }, null, ct)
+            .ConfigureAwait(false);
+        var embedding = embeddings.Length > 0 ? embeddings[0] : [];
+        if (embedding is null || IsZeroVector(embedding))
+            throw new InvalidOperationException(
+                $"Page {pageIndex + 1} of {Path.GetFileName(archivePath)} could not be decoded");
+
+        // Best-effort: persist a page-0 embedding as the cover row so the next
+        // lookup of the same page is a cache hit.
+        if (pageIndex == 0)
+        {
+            try
+            {
+                await _store.SaveCoverAsync(ModelName, archivePath, lastModified, fileSize, embedding)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // Caching only — the query embedding above is already computed.
+            }
+        }
+
+        return embedding;
+    }
+
+    /// <summary>
+    /// Zero-filled embedding = the encoder could not read/decode the input (the
+    /// convention IBatchImageEncoder documents); zero vectors must never be used as
+    /// a query or saved as a cache row.
+    /// </summary>
+    private static bool IsZeroVector(float[]? embedding)
+    {
+        if (embedding is null)
+            return true;
+        for (var i = 0; i < embedding.Length; i++)
+            if (embedding[i] != 0f)
+                return false;
+        return true;
+    }
+
+    /// <summary>
+    /// Path equality for the query-archive exclusion: full-path normalized and
+    /// case-insensitive (directory enumeration can return a different case format
+    /// than the caller's path). GetFullPath failures fall back to a direct comparison
+    /// rather than breaking the search.
+    /// </summary>
+    private static bool IsSameArchivePath(string a, string? b)
+    {
+        if (b is null)
+            return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     /// <summary>

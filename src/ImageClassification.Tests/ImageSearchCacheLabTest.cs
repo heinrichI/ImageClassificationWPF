@@ -74,7 +74,7 @@ public class ImageSearchCacheLabTest
     {
         using var store = new SqliteVectorStore(dbPath);
         var service = new ImageSearchService(
-            new FakeTextEncoder(), encoder, store, NullLogger<ImageSearchService>.Instance);
+            new FakeTextEncoder(), Moq.Mock.Of<ImageClassification.Core.Services.IClipImageEncoder>(), encoder, store, NullLogger<ImageSearchService>.Instance);
 
         return await service.SearchAsync(dir, "autumn");
     }

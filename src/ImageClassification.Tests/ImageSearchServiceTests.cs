@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using ImageClassification.Core.Helpers;
 using ImageClassification.Core.Interfaces;
 using ImageClassification.Core.Models;
 using ImageClassification.Core.Services;
@@ -23,6 +24,7 @@ public class ImageSearchServiceTests : IDisposable
 
     private readonly string _tempDir;
     private readonly Mock<IClipTextEncoder> _textEncoder = new();
+    private readonly Mock<IClipImageEncoder> _imageEncoder = new();
     private readonly Mock<IBatchImageEncoder> _batchEncoder = new();
     private readonly Mock<IVectorStore> _store = new();
     private readonly ImageSearchService _service;
@@ -37,6 +39,12 @@ public class ImageSearchServiceTests : IDisposable
         // Query encoding: deterministic, independent of the text.
         _textEncoder
             .Setup(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns<string, CancellationToken>((_, _) => Task.FromResult(QueryVector));
+
+        // Image-query encoding: the query file's vector is deterministic too — the
+        // same space as the text query and the per-file vectors (4-d in this fixture).
+        _imageEncoder
+            .Setup(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Returns<string, CancellationToken>((_, _) => Task.FromResult(QueryVector));
 
         // Vector store: everything is a cache miss by default (tests that need hits
@@ -67,7 +75,7 @@ public class ImageSearchServiceTests : IDisposable
             .Returns(32);
 
         _service = new ImageSearchService(
-            _textEncoder.Object, _batchEncoder.Object, _store.Object, NullLogger<ImageSearchService>.Instance);
+            _textEncoder.Object, _imageEncoder.Object, _batchEncoder.Object, _store.Object, NullLogger<ImageSearchService>.Instance);
 
         CreateFile(Path.Combine(_tempDir, "a.jpg"));
         CreateFile(Path.Combine(_tempDir, "b.png"));
@@ -108,6 +116,7 @@ public class ImageSearchServiceTests : IDisposable
             "a.jpg" => [1f, 0f, 0f, 0f],
             "b.png" => [0.6f, 0.8f, 0f, 0f],
             "c.tiff" => [0f, 1f, 0f, 0f],
+            "query.png" => [1f, 0f, 0f, 0f], // the image-query file itself (see the SearchByImageAsync tests)
             _ => throw new InvalidOperationException($"No vector registered for {path}")
         };
     }
@@ -118,6 +127,191 @@ public class ImageSearchServiceTests : IDisposable
     {
         lock (_encodedPaths)
             return _encodedPaths.Select(Path.GetFileName).ToList();
+    }
+
+    // ─────────────────────── Image-query ("copy the ViT hash") mode ───────────────────────
+
+    /// <summary>Writes a real 1x1 PNG — the query-image pre-check decodes the file with ImageSharp.</summary>
+    private static void WriteRealPng(string path)
+    {
+        using var image = new SixLabors.ImageSharp.Image<SixLabors.ImageSharp.PixelFormats.Rgb24>(1, 1);
+        using var stream = File.Create(path);
+        image.Save(stream, new SixLabors.ImageSharp.Formats.Png.PngEncoder());
+    }
+
+    [Fact]
+    public async Task SearchByImageAsync_UsesImageEncoderAsQuery_ExcludesTheQueryFile()
+    {
+        // The query file lives inside the scanned directory, so it is also a search
+        // candidate — the service must exclude it from the results (it would score 1.0).
+        var queryPath = Path.Combine(_tempDir, "query.png");
+        WriteRealPng(queryPath);
+
+        var results = await _service.SearchByImageAsync(_tempDir, queryPath);
+
+        _imageEncoder.Verify(e => e.EncodeImageAsync(queryPath, It.IsAny<CancellationToken>()), Times.Once);
+        _textEncoder.Verify(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+
+        Assert.DoesNotContain(results, r => r.FilePath == queryPath);
+        // The query vector equals a.jpg's vector: exact similarities for the others.
+        var a = results.First(r => r.FileName == "a.jpg");
+        Assert.Equal(1f, a.SimilarityScore, 5);
+        var b = results.First(r => r.FileName == "b.png");
+        Assert.Equal(0.6f, b.SimilarityScore, 5);
+        var c = results.First(r => r.FileName == "c.tiff");
+        Assert.Equal(0f, c.SimilarityScore, 5);
+    }
+
+    [Fact]
+    public async Task SearchByImageAsync_MissingQueryFile_ReturnsEmptyAndReportsNote()
+    {
+        var status = new RecordingProgress<ImageSearchStatus>();
+        var missing = Path.Combine(_tempDir, "no-such-query.png");
+
+        var results = await _service.SearchByImageAsync(_tempDir, missing, null, status);
+
+        Assert.Empty(results);
+        var note = Assert.Single(status.Items).Note;
+        Assert.Contains("not found", note);
+        _imageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _batchEncoder.Verify(e => e.EncodeImagesBatchAsync(It.IsAny<List<string>>(), It.IsAny<IProgress<(int Current, int Total)>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task SearchByImageAsync_UndecodableQueryFile_ReturnsEmptyAndReportsNote()
+    {
+        // The pre-check decodes the query with ImageSharp: junk bytes fail before the
+        // (potentially long) directory scan is even started.
+        var status = new RecordingProgress<ImageSearchStatus>();
+        var junk = Path.Combine(_tempDir, "junk.png");
+        File.WriteAllBytes(junk, new byte[] { 0x01, 0x02 });
+
+        var results = await _service.SearchByImageAsync(_tempDir, junk, null, status);
+
+        Assert.Empty(results);
+        Assert.Contains("decoded", Assert.Single(status.Items).Note);
+        _imageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task SearchByImageAsync_EncoderFailure_ReportsNoteAndReturnsEmpty()
+    {
+        // The file decodes, but encoding the query fails (e.g. the ONNX session dies):
+        // the search aborts with a note instead of a half-baked result list.
+        var queryPath = Path.Combine(_tempDir, "query.png");
+        WriteRealPng(queryPath);
+        _imageEncoder
+            .Setup(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("onnx failed"));
+
+        var status = new RecordingProgress<ImageSearchStatus>();
+        var results = await _service.SearchByImageAsync(_tempDir, queryPath, null, status);
+
+        Assert.Empty(results);
+        // The last update is the abort note (earlier ones are the scan/phase markers).
+        Assert.Contains("Query could not be encoded", status.Items[^1].Note);
+    }
+
+    [Fact]
+    public async Task SearchAsync_TextQuery_NeverCallsImageEncoder()
+    {
+        await _service.SearchAsync(_tempDir, "autumn");
+
+        _textEncoder.Verify(e => e.EncodeTextAsync("a photo of autumn", It.IsAny<CancellationToken>()), Times.Once);
+        _imageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ─────────────────────── Hash-query ("search by hash") mode ───────────────────────
+
+    [Fact]
+    public async Task SearchByVectorAsync_UsesProvidedVector_NeverEncodes()
+    {
+        // The cached rows are the deterministic 4-d vectors; the pasted hash equals
+        // a.jpg's vector — the search is a pure cache probe, no encoder involved.
+        GetBatchFactory = entries => new Dictionary<string, float[]?>
+        {
+            [Path.Combine(_tempDir, "a.jpg")] = [1f, 0f, 0f, 0f],
+            [Path.Combine(_tempDir, "b.png")] = [0.6f, 0.8f, 0f, 0f],
+            [Path.Combine(_tempDir, "sub", "c.tiff")] = [0f, 1f, 0f, 0f]
+        };
+
+        var results = await _service.SearchByVectorAsync(_tempDir, QueryVector);
+
+        Assert.Equal(3, results.Count);
+        Assert.Equal("a.jpg", results[0].FileName);
+        Assert.Equal(1f, results[0].SimilarityScore, 5);
+        Assert.Equal(0.6f, results[1].SimilarityScore, 5);
+        Assert.Equal(0f, results[2].SimilarityScore, 5);
+
+        _textEncoder.Verify(e => e.EncodeTextAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _imageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _batchEncoder.Verify(e => e.EncodeImagesBatchAsync(It.IsAny<List<string>>(), It.IsAny<IProgress<(int Current, int Total)>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task SearchByVectorAsync_EmptyVector_ReportsNoteAndReturnsEmpty()
+    {
+        var status = new RecordingProgress<ImageSearchStatus>();
+        var results = await _service.SearchByVectorAsync(_tempDir, [], null, status);
+
+        Assert.Empty(results);
+        Assert.Contains("Query hash is empty", Assert.Single(status.Items).Note);
+    }
+
+    [Fact]
+    public async Task SearchByVectorAsync_DimensionMismatchWithCache_ReportsNote()
+    {
+        // A hash pasted from a DIFFERENT model (3 floats vs the 4-d cache rows) must
+        // abort with a note instead of scoring garbage (or tripping the Debug
+        // dimension assert in VectorMath).
+        GetBatchFactory = entries => new Dictionary<string, float[]?>
+        {
+            [Path.Combine(_tempDir, "a.jpg")] = [1f, 0f, 0f, 0f]
+        };
+
+        var status = new RecordingProgress<ImageSearchStatus>();
+        var results = await _service.SearchByVectorAsync(_tempDir, [1f, 0f, 0f], null, status);
+
+        Assert.Empty(results);
+        Assert.Contains("different model", status.Items[^1].Note);
+    }
+
+    [Fact]
+    public async Task GetImageHashAsync_CacheHit_ReturnsBase64WithoutEncoding()
+    {
+        var path = Path.Combine(_tempDir, "a.jpg");
+        var cached = new float[] { 1f, 0f, 0f, 0f };
+        _store.Setup(s => s.GetAsync(It.IsAny<string>(), path, It.IsAny<DateTime>(), It.IsAny<long>()))
+            .ReturnsAsync(cached);
+
+        var hash = await _service.GetImageHashAsync(path);
+
+        Assert.NotNull(hash);
+        Assert.True(VectorCodec.TryParseBase64(hash, out var parsed));
+        Assert.Equal(cached, parsed);
+        _imageEncoder.Verify(e => e.EncodeImageAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GetImageHashAsync_CacheMiss_EncodesAndReturnsBase64()
+    {
+        // The default store mock answers every lookup with a miss → the shared
+        // (caching) encoder produces the vector, which becomes the hash.
+        var path = Path.Combine(_tempDir, "a.jpg");
+
+        var hash = await _service.GetImageHashAsync(path);
+
+        Assert.NotNull(hash);
+        Assert.True(VectorCodec.TryParseBase64(hash, out var parsed));
+        Assert.Equal(QueryVector, parsed);
+        _imageEncoder.Verify(e => e.EncodeImageAsync(path, It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GetImageHashAsync_MissingFile_ReturnsNull()
+    {
+        var hash = await _service.GetImageHashAsync(Path.Combine(_tempDir, "no-such.jpg"));
+        Assert.Null(hash);
     }
 
     private sealed class RecordingProgress<T> : IProgress<T>

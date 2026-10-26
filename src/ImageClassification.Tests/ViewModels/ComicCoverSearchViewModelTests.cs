@@ -21,6 +21,18 @@ public class ComicCoverSearchViewModelTests
 {
     private class FakeSearchService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         private readonly List<ComicCoverResult> _results;
         private readonly Dictionary<string, List<ComicCoverResult>> _byDirectory = new(StringComparer.OrdinalIgnoreCase);
         private int _searchCalls;
@@ -68,6 +80,22 @@ public class ComicCoverSearchViewModelTests
             return Task.FromResult(results.ToList());
         }
 
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryArchivePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryArchivePath, status, ct);
+
         public Task ClearCacheAsync() => Task.CompletedTask;
 
         public void Dispose() { }
@@ -79,6 +107,18 @@ public class ComicCoverSearchViewModelTests
     /// </summary>
     private sealed class GatedSearchService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         private readonly List<ComicCoverResult> _results;
 
         public TaskCompletionSource<bool> Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -88,6 +128,22 @@ public class ComicCoverSearchViewModelTests
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
         public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
+
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryArchivePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryArchivePath, status, ct);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 
@@ -118,6 +174,18 @@ public class ComicCoverSearchViewModelTests
     /// </summary>
     private sealed class DetailGatedSearchService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         public const string DetailLine = "Processing archives: 1/2 · GPU 1 batches · queue 0";
 
         public TaskCompletionSource<bool> Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -125,6 +193,22 @@ public class ComicCoverSearchViewModelTests
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
         public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
+
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryArchivePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryArchivePath, status, ct);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 
@@ -421,6 +505,18 @@ public class ComicCoverSearchViewModelTests
     /// </summary>
     private sealed class NotesSearchService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         public const string NoteMismatch = "a.cbr: ZIP container inside '.cbr' — re-extracted with ZIP handler";
         public const string NoteFallback = "b.cbr: bulk failed (7z Open failed) — per-entry fallback";
 
@@ -430,6 +526,22 @@ public class ComicCoverSearchViewModelTests
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
         public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
+
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryArchivePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryArchivePath, status, ct);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 
@@ -455,6 +567,18 @@ public class ComicCoverSearchViewModelTests
 
     private sealed class CurrentFileSearchService : IComicCoverSearchService
     {
+
+        // ── Search by hash (pasted embedding vector) ─────────────────────
+        public Task<List<ComicCoverResult>> SearchByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, "hash", status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByVectorAsync(string directoryPath, float[] queryVector,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, "hash", status, ct);
+
+        public Task<string?> GetPageHashAsync(string archivePath, int pageIndex, CancellationToken ct = default)
+            => Task.FromResult<string?>(null);
         public const string File = @"I:\Comics\test.cbr";
 
         public TaskCompletionSource<bool> Gate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -462,6 +586,22 @@ public class ComicCoverSearchViewModelTests
         public Task LoadModelAsync(string clipOnnxPath) => Task.CompletedTask;
 
         public Task<byte[]?> ExtractPageAsync(string archivePath, int pageIndex) => Task.FromResult<byte[]?>(null);
+
+        public Task<List<ComicCoverResult>> SearchByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByImageAsync(string directoryPath, string queryImagePath,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryImagePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAsync(directoryPath, queryArchivePath, status, ct);
+
+        public Task<List<ComicCoverResult>> SearchAllPagesByArchivePageAsync(string directoryPath, string queryArchivePath, int queryPageIndex,
+            IProgress<ComicSearchStatus>? status = null, CancellationToken ct = default)
+            => SearchAllPagesAsync(directoryPath, queryArchivePath, status, ct);
 
         public Task ClearCacheAsync() => Task.CompletedTask;
 

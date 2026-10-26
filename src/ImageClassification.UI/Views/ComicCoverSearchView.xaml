@@ -98,12 +98,30 @@
 
                     <!-- Query input (editable combo = input box + history dropdown) and action buttons -->
                     <GroupBox Header="2. Search query" Grid.Row="1" Margin="0,0,0,5">
+                        <GroupBox.ToolTip>
+                            <TextBlock>
+                                Describe the covers you are looking for in a few words, e.g. "beach, summer".
+                                <LineBreak />
+                                The box is also a dropdown with the last 10 launched phrases.
+                                <LineBreak />
+                                Or pick "Image…" to search by a file's CLIP embedding (its ViT hash)
+                                instead of a phrase — right-click a result tile for "Find similar".
+                                <LineBreak />
+                                Or paste a copied hash (right-click a tile → "Copy hash") and press
+                                "Search by hash" — the search uses exactly that embedding: no file, no phrase.
+                            </TextBlock>
+                        </GroupBox.ToolTip>
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="Auto" />
                                 <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
                             <!-- IsTextSearchEnabled=FALSE: typing must not jump the selection
                                  onto a history item (that would overwrite the typed text). -->
                             <ComboBox Grid.Column="0"
@@ -125,6 +143,61 @@
                                     Command="{Binding CancelCommand}"
                                     IsEnabled="{Binding IsBusy}"
                                     Padding="15,5" />
+
+                            <!-- Image-query mode: the query is a file's CLIP embedding instead of
+                                 a phrase. "Image…" is always available; the name + clear button
+                                 appear while an image query is set. -->
+                            <Button Grid.Row="1" Grid.Column="0"
+                                    Content="Image…"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Center"
+                                    Command="{Binding ChooseQueryImageCommand}"
+                                    IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBoolConverter}}"
+                                    Padding="10,3"
+                                    Margin="0,5,5,0"
+                                    ToolTip="Search by a file's CLIP embedding (its ViT hash) instead of a phrase. The image is encoded with the same cached model as the search targets — an already-searched file costs nothing." />
+                            <StackPanel Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2"
+                                        Orientation="Horizontal"
+                                        HorizontalAlignment="Right"
+                                        Margin="0,5,0,0"
+                                        Visibility="{Binding IsImageQuery, Converter={StaticResource BoolToVisConverter}}">
+                                <TextBlock Text="{Binding QueryImageName}"
+                                           VerticalAlignment="Center"
+                                           Margin="0,0,8,0"
+                                           ToolTip="{Binding QueryImagePath}"
+                                           MaxWidth="220" TextTrimming="CharacterEllipsis" />
+                                <Button Content="✕ Clear"
+                                        Command="{Binding ClearQueryImageCommand}"
+                                        IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBoolConverter}}"
+                                        Padding="8,3" />
+                            </StackPanel>
+
+                            <!-- Hash-query mode: the query is a PASTED embedding hash (base64 of the
+                                 float vector, copied from a result tile). "Search by hash" searches with
+                                 exactly that vector — nothing is encoded, nothing is excluded. -->
+                            <TextBox Grid.Row="2" Grid.Column="0"
+                                      Text="{Binding QueryHash, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      VerticalAlignment="Center"
+                                      MaxHeight="58"
+                                      Margin="0,5,5,0"
+                                      IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBoolConverter}}"
+                                      ToolTip="Paste the base64 hash copied from a result tile (right-click → Copy hash) and press 'Search by hash'. The search uses exactly this embedding: no file, no phrase. The button stays disabled until the box holds a valid hash." />
+                            <Button Grid.Row="2" Grid.Column="1"
+                                    Content="Search by hash"
+                                    Command="{Binding SearchByHashCommand}"
+                                    Padding="12,3"
+                                    Margin="0,5,5,0"
+                                    VerticalAlignment="Center"
+                                    ToolTip="Search by the pasted embedding hash only (right-click a result tile → Copy hash to get one)." />
+                            <Button Grid.Row="2" Grid.Column="2"
+                                    Content="✕"
+                                    Command="{Binding ClearQueryHashCommand}"
+                                    IsEnabled="{Binding IsBusy, Converter={StaticResource InvertBoolConverter}}"
+                                    Padding="8,3"
+                                    Margin="0,5,0,0"
+                                    VerticalAlignment="Center"
+                                    Visibility="{Binding QueryHash, Converter={StaticResource NonEmptyStringToVisibilityConverter}}"
+                                    ToolTip="Clear the hash" />
                         </Grid>
                     </GroupBox>
 
@@ -135,6 +208,10 @@
                                 Minimum similarity score: results below this threshold are hidden.
                                 <LineBreak />
                                 Values range from 0% (show all) to 100% (exact match only).
+                                <LineBreak />
+                                Image-to-image queries score higher than text queries
+                                (similar images typically sit at 70–95%), so the same
+                                threshold hides fewer results in image mode.
                             </TextBlock>
                         </GroupBox.ToolTip>
                         <Grid>
@@ -292,6 +369,19 @@
                                             <MenuItem Header="Copy path"
                                                       Command="{Binding PlacementTarget.Tag.CopyArchivePathCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
                                                       CommandParameter="{Binding ArchivePath}" />
+                                            <!-- Find comics with a page similar to THIS one: the query is the
+                                                 tile's page vector taken from the vector store (its ViT hash)
+                                                 and the tile's own archive is excluded. -->
+                                            <MenuItem Header="Find similar by this page"
+                                                      Command="{Binding PlacementTarget.Tag.SearchSimilarCoverCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding}" />
+                                            <!-- Copies the page's CLIP embedding (its ViT hash) in base64
+                                                 text form — paste it into the query box and press "Search by
+                                                 hash". The vector comes from the store (one SQL lookup for a
+                                                 page that was ever searched). -->
+                                            <MenuItem Header="Copy hash"
+                                                      Command="{Binding PlacementTarget.Tag.CopyHashCommand, RelativeSource={RelativeSource AncestorType=ContextMenu}}"
+                                                      CommandParameter="{Binding}" />
                                         </ContextMenu>
                                     </Border.ContextMenu>
                                     <Border.InputBindings>
